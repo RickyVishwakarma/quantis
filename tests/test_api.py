@@ -15,7 +15,8 @@ def client(tmp_path_factory):
     root = tmp_path_factory.mktemp("api")
     lake = BarLake(root / "lake")
     lake.save_bars(generate_synthetic(SYMS, start="2021-01-01", end="2023-12-31", seed=9))
-    app = create_app(lake_root=str(root / "lake"), runs_root=str(root / "runs"))
+    app = create_app(lake_root=str(root / "lake"), runs_root=str(root / "runs"),
+                     paper_root=str(root / "paper_sessions"))
     return TestClient(app)
 
 
@@ -46,6 +47,27 @@ def test_backtest_run_and_registry(client):
     detail = client.get(f"/v1/runs/{body['run_id']}").json()
     assert len(detail["equity"]["ts"]) == len(detail["equity"]["value"]) > 100
     assert detail["risk"].get("evaluated", 0) > 0
+
+
+def test_paper_replay_and_registry(client):
+    res = client.post("/v1/paper/replay", json={
+        "strategy": "ma_crossover",
+        "params": {"fast": 10, "slow": 50},
+        "capital": 1_000_000,
+        "warmup": 210,
+    })
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert "sharpe" in body["metrics"]
+    assert body["risk_status"]["breaker_tripped"] is False
+    assert "clean" in body["reconciliation"]
+
+    sessions = client.get("/v1/paper/sessions").json()
+    assert any(s["session_id"] == body["session_id"] for s in sessions)
+
+    detail = client.get(f"/v1/paper/sessions/{body['session_id']}").json()
+    assert len(detail["equity"]["ts"]) > 100
+    assert detail["strategy"] == "ma_crossover"
 
 
 def test_unknown_strategy_422(client):

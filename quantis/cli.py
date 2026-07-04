@@ -176,6 +176,79 @@ def cmd_walkforward(args) -> int:
     return 0
 
 
+def cmd_paper(args) -> int:
+    from datetime import datetime
+
+    from .backtest.metrics import format_metrics
+    from .feed import ReplayFeed
+    from .paper import PaperTradingEngine
+    from .research import get_tracker
+
+    wide = _load_wide(args)
+    cls = strategies.get(args.strategy)
+    strat = cls(**_parse_params(args.param))
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = f"paper_sessions/{stamp}_{args.strategy}"
+    engine = PaperTradingEngine(
+        strategy=strat,
+        initial_capital=args.capital,
+        cost_model=NSECostModel(segment=args.segment),
+        risk_limits=RiskLimits(),
+        execution_algo=args.algo,
+        twap_slices=args.slices,
+        vol_targeting=args.vol_target,
+        session_dir=session_dir,
+    )
+    feed = ReplayFeed(wide, start=args.start, end=args.end)
+    n_bars = len(feed.index)
+    print(f"Paper session (replay): {strat.describe()}, {n_bars} bars, "
+          f"algo={args.algo}, warmup={args.warmup}")
+    session = engine.run(feed, warmup_bars=args.warmup)
+
+    print("\nPAPER SESSION REPORT")
+    print("=" * 50)
+    if session.metrics:
+        print(format_metrics(session.metrics))
+    n_evals = len(session.risk_decisions)
+    n_rej = int((session.risk_decisions["outcome"] == "REJECT").sum()) if n_evals else 0
+    print(f"\nRisk evaluations  {n_evals} orders gated, {n_rej} vetoed")
+    print(f"Risk status       {session.risk_status}")
+    print(f"Open positions    {len(session.final_positions)}")
+    print(f"Reconciliation    {session.reconciliation}")
+
+    if args.parity:
+        from .backtest import EventBacktester
+        from .features import compute_features
+
+        panel = compute_features(wide)
+        weights = cls(**_parse_params(args.param)).target_weights(panel)
+        weights.iloc[:max(args.warmup - 1, 0)] = 0.0    # same first trading day
+        bt = EventBacktester(initial_capital=args.capital,
+                             cost_model=NSECostModel(segment=args.segment),
+                             risk_limits=RiskLimits())
+        bt_result = bt.run_weights(panel, weights)
+        paper_eq, bt_eq = session.equity.align(bt_result.equity, join="inner")
+        if len(paper_eq) > 10:
+            corr = paper_eq.pct_change().corr(bt_eq.pct_change())
+            gap = abs(paper_eq.iloc[-1] / bt_eq.iloc[-1] - 1)
+            print("\nBACKTEST PARITY (same window, same first trading day):")
+            print(f"  daily-return correlation  {corr:.4f}")
+            print(f"  paper final equity        Rs {paper_eq.iloc[-1]:,.0f}")
+            print(f"  backtest final equity     Rs {bt_eq.iloc[-1]:,.0f}")
+            print(f"  terminal wealth gap       {gap:.2%}")
+
+    get_tracker().log_run(
+        name=f"{args.strategy}_paper", params=strat.params,
+        metrics={k: v for k, v in session.metrics.items()
+                 if isinstance(v, (int, float))},
+        artifacts_dir=session.session_dir,
+        tags={"engine": "paper", "algo": args.algo, "source": "cli"},
+    )
+    print(f"\nArtifacts: {session.session_dir}")
+    return 0
+
+
 def cmd_materialize(args) -> int:
     from .fstore import FEATURE_SCHEMA_VERSION, FeatureStore
 
@@ -244,6 +317,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--capital", type=float, default=1_000_000.0)
     _add_common(p)
     p.set_defaults(fn=cmd_walkforward)
+
+    p = sub.add_parser("paper", help="paper trading session (replay feed, OMS/EMS, full risk)")
+    p.add_argument("--strategy", required=True)
+    p.add_argument("--param", action="append", metavar="KEY=VAL")
+    p.add_argument("--capital", type=float, default=1_000_000.0)
+    p.add_argument("--segment", choices=["delivery", "intraday"], default="delivery")
+    p.add_argument("--algo", choices=["immediate", "twap"], default="immediate")
+    p.add_argument("--slices", type=int, default=4)
+    p.add_argument("--warmup", type=int, default=210,
+                   help="bars of history before trading begins")
+    p.add_argument("--vol-target", action="store_true",
+                   help="enable volatility-targeting overlay")
+    p.add_argument("--parity", action="store_true",
+                   help="also run the event backtest and report divergence")
+    _add_common(p)
+    p.set_defaults(fn=cmd_paper)
 
     p = sub.add_parser("materialize", help="materialize features into the feature store")
     p.add_argument("--feature-store", default="data/feature_store")

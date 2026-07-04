@@ -64,6 +64,7 @@
   <nav>
     <a class="active" data-view="backtest">BACKTEST</a>
     <a data-view="walkforward">WALK-FORWARD</a>
+    <a data-view="paper">PAPER TRADING</a>
     <a data-view="runs">RUNS</a>
   </nav>
   <main>
@@ -113,6 +114,36 @@
       <div class="panel">
         <h2>WINDOWS</h2>
         <div id="wfWindows"></div>
+      </div>
+    </section>
+
+    <!-- PAPER TRADING VIEW -->
+    <section id="view-paper" class="hidden">
+      <div class="row">
+        <div class="panel" style="max-width:360px">
+          <h2>PAPER SESSION · REPLAY FEED</h2>
+          <label>strategy</label><select id="ppStrategy"></select>
+          <label>params (json)</label><input id="ppParams" value="{}">
+          <label>start</label><input id="ppStart" value="2022-01-01">
+          <label>execution algo</label>
+          <select id="ppAlgo"><option>immediate</option><option>twap</option></select>
+          <label>capital (INR)</label><input id="ppCapital" value="1000000">
+          <button id="ppRun">RUN PAPER SESSION</button>
+          <p id="ppLog"></p>
+        </div>
+        <div class="panel">
+          <h2>SESSION RESULT · OMS/EMS/SIM-BROKER · FULL RISK SET</h2>
+          <div class="metrics" id="ppMetrics"></div>
+          <div style="height:12px"></div>
+          <canvas id="ppChart" width="900" height="260"></canvas>
+          <div style="height:12px"></div>
+          <div id="ppRisk" class="metrics"></div>
+          <p id="ppRecon" style="color:var(--dim);font-size:11px;margin-top:10px"></p>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>SESSION REGISTRY</h2>
+        <div id="ppSessions"></div>
       </div>
     </section>
 
@@ -185,9 +216,10 @@ function renderTable(el, rows, cols, onClick) {
 document.querySelectorAll("nav a").forEach(a => a.onclick = () => {
   document.querySelectorAll("nav a").forEach(x => x.classList.remove("active"));
   a.classList.add("active");
-  ["backtest","walkforward","runs"].forEach(v =>
+  ["backtest","walkforward","paper","runs"].forEach(v =>
     $("view-" + v).classList.toggle("hidden", v !== a.dataset.view));
   if (a.dataset.view === "runs") loadRuns();
+  if (a.dataset.view === "paper") loadPaperSessions();
 });
 
 // ---- init ----
@@ -196,6 +228,11 @@ async function init() {
   $("lakeStatus").textContent =
     `lake: ${lake.n_symbols} symbols · ${lake.start ?? "?"} → ${lake.end ?? "?"}`;
   const strats = await (await fetch("/v1/strategies")).json();
+  $("ppStrategy").innerHTML = strats.map(s => `<option>${s.name}</option>`).join("");
+  $("ppStrategy").onchange = () => {
+    const s = strats.find(x => x.name === $("ppStrategy").value);
+    $("ppParams").value = JSON.stringify(s.default_params);
+  };
   for (const sel of [$("btStrategy"), $("wfStrategy")]) {
     sel.innerHTML = strats.map(s => `<option>${s.name}</option>`).join("");
     sel.onchange = () => {
@@ -208,6 +245,60 @@ async function init() {
   }
   $("btStrategy").onchange();
   $("wfStrategy").onchange();
+  $("ppStrategy").onchange();
+}
+
+// ---- paper trading ----
+$("ppRun").onclick = async () => {
+  $("ppRun").disabled = true;
+  $("ppLog").textContent = "running paper session (feed → risk → OMS → EMS → sim broker)…";
+  try {
+    const res = await fetch("/v1/paper/replay", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        strategy: $("ppStrategy").value,
+        params: JSON.parse($("ppParams").value || "{}"),
+        start: $("ppStart").value || null,
+        algo: $("ppAlgo").value,
+        capital: +$("ppCapital").value,
+      })});
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const s = await res.json();
+    $("ppLog").textContent = "session: " + s.session_id;
+    renderPaperSession(s.session_id);
+    loadPaperSessions();
+  } catch (e) { $("ppLog").textContent = "error: " + e.message; }
+  $("ppRun").disabled = false;
+};
+
+async function renderPaperSession(id) {
+  const d = await (await fetch("/v1/paper/sessions/" + id)).json();
+  const m = d.metrics || {};
+  metricCards($("ppMetrics"), [
+    ["SHARPE", fmtNum(m.sharpe)],
+    ["CAGR", fmtPct(m.cagr), m.cagr >= 0 ? "pos" : "neg"],
+    ["MAX DD", fmtPct(m.max_drawdown), "neg"],
+    ["SORTINO", fmtNum(m.sortino)],
+    ["ALGO", d.execution_algo || "–"],
+    ["CASH", "Rs " + Math.round(d.cash ?? 0).toLocaleString()],
+    ["OPEN POSITIONS", Object.keys(d.final_positions || {}).length],
+  ]);
+  drawLine($("ppChart"), d.equity.ts, d.equity.value);
+  const rs = d.risk_status || {};
+  metricCards($("ppRisk"), [
+    ["BREAKER", rs.breaker_tripped ? "TRIPPED" : "ARMED",
+     rs.breaker_tripped ? "neg" : "pos"],
+    ["BREAKER REASON", rs.breaker_reason || "–"],
+    ["CONSEC. REJECTS", rs.consecutive_rejects ?? 0],
+  ]);
+  $("ppRecon").textContent = d.reconciliation || "";
+}
+
+async function loadPaperSessions() {
+  const sessions = await (await fetch("/v1/paper/sessions")).json();
+  renderTable($("ppSessions"), sessions,
+    ["session_id", "strategy", "algo", "sharpe", "breaker_tripped"],
+    r => renderPaperSession(r.session_id));
 }
 
 // ---- backtest ----

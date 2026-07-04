@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantis"
-version = "0.2.0"
-description = "Quantis — AI quantitative research and execution platform for Indian equities and derivatives (Phase 2: research platform)"
+version = "0.3.0"
+description = "Quantis — AI quantitative research and execution platform for Indian equities and derivatives (Phase 3: paper trading)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

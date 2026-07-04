@@ -14,3 +14,4 @@ mlruns/
 .ipynb_checkpoints/
 *.parquet
 .env
+paper_sessions/

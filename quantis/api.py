@@ -36,6 +36,16 @@ class BacktestRequest(BaseModel):
     segment: str = "delivery"
 
 
+class PaperReplayRequest(BaseModel):
+    strategy: str
+    params: dict = Field(default_factory=dict)
+    start: str | None = None
+    end: str | None = None
+    capital: float = 1_000_000.0
+    algo: str = "immediate"
+    warmup: int = 210
+
+
 class WalkForwardRequest(BaseModel):
     strategy: str
     grid: dict[str, list] = Field(default_factory=dict)
@@ -47,7 +57,8 @@ class WalkForwardRequest(BaseModel):
     capital: float = 1_000_000.0
 
 
-def create_app(lake_root: str = "data/lake", runs_root: str = "runs") -> FastAPI:
+def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
+               paper_root: str = "paper_sessions") -> FastAPI:
     app = FastAPI(title="Quantis Research API", version="0.2.0")
 
     def load_wide(start=None, end=None):
@@ -174,6 +185,76 @@ def create_app(lake_root: str = "data/lake", runs_root: str = "runs") -> FastAPI
             "deflated_sharpe": wf.deflated_sharpe,
             "oos_equity": {"ts": [str(t.date()) for t in wf.oos_equity.index],
                            "value": [float(v) for v in wf.oos_equity]},
+        }
+
+    @app.get("/v1/paper/sessions")
+    def list_paper_sessions():
+        root = Path(paper_root)
+        out = []
+        if root.exists():
+            for d in sorted(root.iterdir(), reverse=True):
+                sfile = d / "session.json"
+                if sfile.exists():
+                    s = json.loads(sfile.read_text())
+                    out.append({
+                        "session_id": d.name,
+                        "strategy": s.get("strategy"),
+                        "algo": s.get("execution_algo"),
+                        "sharpe": s.get("metrics", {}).get("sharpe"),
+                        "breaker_tripped": s.get("risk_status", {}).get("breaker_tripped"),
+                    })
+        return out
+
+    @app.get("/v1/paper/sessions/{session_id}")
+    def paper_session_detail(session_id: str):
+        d = Path(paper_root) / session_id
+        if not (d / "session.json").exists():
+            raise HTTPException(404, f"paper session {session_id} not found")
+        s = json.loads((d / "session.json").read_text())
+        equity = pd.read_csv(d / "equity.csv", index_col=0)
+        recon = (d / "reconciliation.txt")
+        return {
+            "session_id": session_id,
+            **s,
+            "equity": {"ts": list(equity.index.astype(str)),
+                       "value": [float(v) for v in equity.iloc[:, 0]]},
+            "reconciliation": recon.read_text(encoding="utf-8") if recon.exists() else "",
+        }
+
+    @app.post("/v1/paper/replay")
+    def run_paper_replay(req: PaperReplayRequest):
+        from datetime import datetime
+
+        from .feed import ReplayFeed
+        from .paper import PaperTradingEngine
+
+        if req.strategy not in strategies.available():
+            raise HTTPException(422, f"unknown strategy {req.strategy!r}")
+        wide = load_wide(req.start, req.end)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = Path(paper_root) / f"{stamp}_{req.strategy}"
+        engine = PaperTradingEngine(
+            strategy=strategies.get(req.strategy)(**req.params),
+            initial_capital=req.capital,
+            risk_limits=RiskLimits(),
+            execution_algo=req.algo,
+            session_dir=session_dir,
+        )
+        session = engine.run(ReplayFeed(wide), warmup_bars=req.warmup)
+        get_tracker(runs_root).log_run(
+            name=f"{req.strategy}_paper", params=req.params,
+            metrics={k: v for k, v in session.metrics.items()
+                     if isinstance(v, (int, float))},
+            artifacts_dir=session_dir,
+            tags={"engine": "paper", "algo": req.algo, "source": "api"},
+        )
+        return {
+            "session_id": session_dir.name,
+            "metrics": {k: v for k, v in session.metrics.items()
+                        if isinstance(v, (int, float, str))},
+            "risk_status": session.risk_status,
+            "final_positions": session.final_positions,
+            "reconciliation": session.reconciliation,
         }
 
     @app.get("/")

@@ -1,10 +1,35 @@
 # Quantis
 
 AI quantitative research and execution platform for Indian equities and derivatives.
-This repo implements **Phases 1–2** of the Quantis TDD: the full research loop — data →
-feature store → strategy → walk-forward validation → risk-gated backtest → tracked
-experiment — built so that every later phase (paper trading, AI signals, live execution)
-extends it without a rewrite.
+This repo implements **Phases 1–3** of the Quantis TDD: research loop (data → feature
+store → strategy → walk-forward → risk-gated backtest → tracked experiment) plus paper
+trading through a real OMS/EMS against a simulated broker — the exact architecture that
+goes live in Phase 5 with only the broker adapter swapped.
+
+## Phase 3 — paper trading
+
+- **Broker abstraction** (`quantis/broker/`) — one interface (`place / cancel /
+  poll_fills / positions / margins`), idempotent on `client_order_id` so a network retry
+  can never double-execute. `SimulatedBroker` fills at next-bar open with the shared NSE
+  cost model; Phase 5 adds Zerodha/Upstox adapters behind the same interface.
+- **OMS** (`quantis/oms/`) — order state machine with the TDD's exact status lifecycle
+  (`PENDING_RISK → APPROVED → SENT → PARTIALLY_FILLED → FILLED/CANCELLED/ERROR`);
+  illegal transitions raise; every transition appends to an `orders.jsonl` audit journal.
+- **EMS skeleton** (`quantis/ems/`) — execution algos: immediate and TWAP slicing
+  (each child's ADV participation is 1/N of the block's, so impact is measurably lower —
+  tested). Refuses any order that isn't risk-APPROVED.
+- **Full risk limit set** (`quantis/risk/live.py`) — tiered drawdown response
+  (NORMAL → HALVED → FLATTEN → HALTED), circuit breakers (consecutive rejections, feed
+  staleness, broker error spike, manual panic button), volatility targeting, and manual
+  `reset()` — a halt never re-arms itself.
+- **Paper engine** (`quantis/paper/`) — feed → strategy (same code path as backtest) →
+  risk gate → OMS → EMS → sim broker, decision at close t / fill at open t+1. Sessions
+  persist journal, fills, equity, risk decisions, and a reconciliation report.
+- **Reconciliation** — diffs OMS fill-implied positions vs the broker's book
+  (the TDD's network-partition safeguard), run at session end and on demand.
+- **Backtest parity, tested** — same data, same limits, same first trading day: paper
+  and backtest agree to ~0.2% terminal wealth on the controlled test; the CLI `--parity`
+  flag reports live tracking divergence on any real run.
 
 ## Phase 2 — research platform
 
@@ -68,7 +93,11 @@ quantis sweep --strategy ma_crossover --grid fast=10,20,50 --grid slow=50,100,20
 # 4. Walk-forward validation — out-of-sample evidence, Monte Carlo, deflated Sharpe
 quantis walkforward --strategy momentum --grid top_n=5,10 --grid rebalance_days=21,42
 
-# 5. Feature store + research workspace
+# 5. Paper trading — replay feed through OMS/EMS/sim-broker with the full risk set
+quantis paper --strategy momentum --start 2024-01-01 --parity
+quantis paper --strategy ma_crossover --algo twap --slices 4
+
+# 6. Feature store + research workspace
 quantis materialize                          # versioned point-in-time feature tables
 quantis ui                                   # http://127.0.0.1:8000
 
@@ -91,7 +120,7 @@ pytest                                        # cost model, risk rules, look-ahe
 
 1. **MVP** — data, features, backtester, strategy templates, risk limits ✅
 2. **Research platform** — feature store, walk-forward validation, experiment tracking, research UI ✅
-3. Paper trading — real-time feed, simulated broker adapter, OMS/EMS skeleton, full limit set
+3. **Paper trading** — replay/delayed feed, simulated broker adapter, OMS/EMS, full limit set ✅
 4. AI integration — GBT + sequence models, model registry, shadow-mode promotion, LLM copilot
 5. Live trading — broker connectors (Zerodha/Upstox), reconciliation, circuit breakers, SEBI audit tagging
 6. Institutional — multi-asset, multi-tenant RBAC, strategy marketplace, white-label API

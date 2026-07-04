@@ -20,5 +20,18 @@ class RiskLimits:
     # Sanity bound (TDD's AI-hallucination safeguard, applied to ALL sources)
     max_order_notional_pct: float = 0.25   # single order vs equity
 
+    # --- Phase 3: tiered drawdown response (TDD Part 8: halve -> flatten -> halt)
+    soft_drawdown: float = 0.08            # tier 1: new orders sized at half
+    flatten_drawdown: float = 0.15         # tier 2: exit everything, no new risk
+    # (tier 3 halt = circuit breaker, manual reset required)
+
+    # --- Phase 3: volatility targeting
+    target_vol: float = 0.18               # annualized; book scales down above band
+    vol_scale_floor: float = 0.25          # never scale below 25% of target weights
+
+    # --- Phase 3: circuit breakers
+    breaker_consecutive_rejects: int = 10  # trip after N rejects in a row
+    breaker_feed_stale_secs: float = 300.0 # trip when feed silent this long
+
     def snapshot(self) -> dict:
         return asdict(self)
