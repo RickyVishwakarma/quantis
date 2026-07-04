@@ -1,9 +1,12 @@
 """Quantis CLI.
 
-    quantis ingest    --source yahoo|synthetic --start 2018-01-01
-    quantis backtest  --strategy momentum --start 2019-01-01
-    quantis sweep     --strategy ma_crossover --grid fast=10,20 --grid slow=50,100,200
-    quantis list      (available strategies + lake contents)
+    quantis ingest       --source yahoo|synthetic --start 2018-01-01
+    quantis backtest     --strategy momentum --start 2019-01-01
+    quantis sweep        --strategy ma_crossover --grid fast=10,20 --grid slow=50,100,200
+    quantis walkforward  --strategy momentum --grid top_n=5,10 --train-days 504 --test-days 126
+    quantis materialize  (compute + version the feature set into the feature store)
+    quantis ui           (research workspace at http://127.0.0.1:8000)
+    quantis list         (available strategies + lake contents)
 """
 
 from __future__ import annotations
@@ -78,9 +81,17 @@ def cmd_backtest(args) -> int:
           f"{len(wide['close'])} bars…")
     result = engine.run(wide, strat)
     run_dir = write_run(result)
+
+    from .research import get_tracker
+    import json
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    tracker = get_tracker()
+    tracker.log_run(name=strat.describe(), params=strat.params, metrics=metrics,
+                    artifacts_dir=run_dir, tags={"engine": "event", "source": "cli"})
+
     print()
     print((run_dir / "report.txt").read_text(encoding="utf-8"))
-    print(f"\nArtifacts: {run_dir}")
+    print(f"\nArtifacts: {run_dir}  (experiment logged via {tracker.backend})")
     return 0
 
 
@@ -105,6 +116,84 @@ def cmd_sweep(args) -> int:
                           float_format=lambda x: f"{x:.3f}"))
     print("\nNote: validate the winner in the event engine (`quantis backtest`) —")
     print("it adds the risk gate, cash constraints, and per-order slippage.")
+    return 0
+
+
+def _parse_grid(specs: list[str]) -> dict:
+    grid = {}
+    for spec in specs:
+        k, vals = spec.split("=", 1)
+        parsed = []
+        for v in vals.split(","):
+            try:
+                parsed.append(int(v))
+            except ValueError:
+                parsed.append(float(v))
+        grid[k] = parsed
+    return grid
+
+
+def cmd_walkforward(args) -> int:
+    from .backtest.metrics import format_metrics
+    from .research import WalkForwardConfig, get_tracker, run_walkforward
+
+    wide = _load_wide(args)
+    grid = _parse_grid(args.grid)
+    cfg = WalkForwardConfig(train_days=args.train_days, test_days=args.test_days,
+                            expanding=args.expanding)
+    mode = "expanding" if cfg.expanding else "rolling"
+    print(f"Walk-forward: {args.strategy}, {mode} train={cfg.train_days}d "
+          f"test={cfg.test_days}d, grid={grid}")
+    wf = run_walkforward(wide, args.strategy, grid, cfg,
+                         initial_capital=args.capital)
+
+    print("\nPER-WINDOW (params selected on train, evaluated OOS):")
+    print(wf.windows.to_string(index=False))
+    print("\nSTITCHED OUT-OF-SAMPLE PERFORMANCE (the only evidence):")
+    print(format_metrics(wf.oos_metrics))
+    mc = wf.monte_carlo
+    if "error" not in mc:
+        print(f"\nMonte Carlo ({mc['n_sims']} block-bootstrap resamples):")
+        print(f"  Sharpe p5/p50/p95   {mc['sharpe_p05']:.2f} / "
+              f"{mc['sharpe_p50']:.2f} / {mc['sharpe_p95']:.2f}")
+        print(f"  MaxDD  p5/p50/p95   {mc['maxdd_p05']:.1%} / "
+              f"{mc['maxdd_p50']:.1%} / {mc['maxdd_p95']:.1%}")
+        print(f"  P(Sharpe < 0)       {mc['prob_sharpe_negative']:.1%}")
+    print(f"\nDeflated Sharpe (P[true SR > 0], {wf.n_trials} trials): "
+          f"{wf.deflated_sharpe:.1%}")
+
+    tracker = get_tracker()
+    tracker.log_run(
+        name=f"{args.strategy}_walkforward",
+        params={"grid": str(grid), "train_days": cfg.train_days,
+                "test_days": cfg.test_days, "mode": mode},
+        metrics={**{k: v for k, v in wf.oos_metrics.items()
+                    if isinstance(v, (int, float))},
+                 "deflated_sharpe": wf.deflated_sharpe},
+        tags={"engine": "walkforward", "source": "cli"},
+    )
+    print(f"Experiment logged via {tracker.backend}")
+    return 0
+
+
+def cmd_materialize(args) -> int:
+    from .fstore import FEATURE_SCHEMA_VERSION, FeatureStore
+
+    wide = _load_wide(args)
+    fs = FeatureStore(args.feature_store)
+    counts = fs.materialize(wide)
+    print(f"Materialized {len(counts)} features (schema v{FEATURE_SCHEMA_VERSION}) "
+          f"into {fs.root}:")
+    for name, n in sorted(counts.items()):
+        print(f"  {name:<16} {n:>8} rows")
+    return 0
+
+
+def cmd_ui(args) -> int:
+    import uvicorn
+
+    print(f"Quantis research workspace: http://127.0.0.1:{args.port}")
+    uvicorn.run("quantis.api:app", host=args.host, port=args.port, log_level="warning")
     return 0
 
 
@@ -145,6 +234,26 @@ def main(argv: list[str] | None = None) -> int:
                    metavar="KEY=V1,V2,...")
     _add_common(p)
     p.set_defaults(fn=cmd_sweep)
+
+    p = sub.add_parser("walkforward", help="walk-forward validation with OOS stitching")
+    p.add_argument("--strategy", required=True)
+    p.add_argument("--grid", action="append", required=True, metavar="KEY=V1,V2,...")
+    p.add_argument("--train-days", type=int, default=504)
+    p.add_argument("--test-days", type=int, default=126)
+    p.add_argument("--expanding", action="store_true")
+    p.add_argument("--capital", type=float, default=1_000_000.0)
+    _add_common(p)
+    p.set_defaults(fn=cmd_walkforward)
+
+    p = sub.add_parser("materialize", help="materialize features into the feature store")
+    p.add_argument("--feature-store", default="data/feature_store")
+    _add_common(p)
+    p.set_defaults(fn=cmd_materialize)
+
+    p = sub.add_parser("ui", help="serve the research workspace + API")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.set_defaults(fn=cmd_ui)
 
     p = sub.add_parser("list", help="list strategies and lake contents")
     p.add_argument("--lake", default="data/lake")

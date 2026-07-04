@@ -20,12 +20,12 @@ from .costs import NSECostModel
 from .metrics import compute_metrics
 
 
-def vectorized_run(
+def vectorized_returns(
     wide: dict[str, pd.DataFrame],
     weights: pd.DataFrame,
     cost_model: NSECostModel | None = None,
-    initial_capital: float = 1_000_000.0,
 ) -> pd.Series:
+    """Daily portfolio returns net of turnover costs (whole history)."""
     costs = cost_model or NSECostModel()
     open_px = wide["open"]
     rets = open_px.pct_change().reindex(weights.index)
@@ -39,9 +39,17 @@ def vectorized_run(
 
     turnover = (w.shift(1) - w.shift(2)).abs().sum(axis=1) / 2
     cost_per_turnover = costs.round_trip_bps() / 10_000
-    port_ret = port_ret - turnover * cost_per_turnover
+    return (port_ret - turnover * cost_per_turnover).fillna(0.0)
 
-    equity = initial_capital * (1 + port_ret.fillna(0.0)).cumprod()
+
+def vectorized_run(
+    wide: dict[str, pd.DataFrame],
+    weights: pd.DataFrame,
+    cost_model: NSECostModel | None = None,
+    initial_capital: float = 1_000_000.0,
+) -> pd.Series:
+    port_ret = vectorized_returns(wide, weights, cost_model)
+    equity = initial_capital * (1 + port_ret).cumprod()
     equity.name = "equity"
     return equity
 

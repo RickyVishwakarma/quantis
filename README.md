@@ -1,11 +1,32 @@
 # Quantis
 
 AI quantitative research and execution platform for Indian equities and derivatives.
-This repo is **Phase 1 (MVP)** of the Quantis TDD: the research loop — data → features →
-strategy → risk-gated backtest → report — built so that every later phase (paper trading,
-AI signals, live execution) extends it without a rewrite.
+This repo implements **Phases 1–2** of the Quantis TDD: the full research loop — data →
+feature store → strategy → walk-forward validation → risk-gated backtest → tracked
+experiment — built so that every later phase (paper trading, AI signals, live execution)
+extends it without a rewrite.
 
-## What's in the MVP
+## Phase 2 — research platform
+
+- **Feature store** (`quantis/fstore/`) — materialized, versioned features using the TDD's
+  offline-table schema `(instrument_id, feature_name, as_of_ts, value, schema_version)`.
+  `get_asof()` is a point-in-time join that structurally cannot return future values;
+  `training_frame()` builds supervised datasets with strictly-future labels (Phase 4 prep).
+  Feast is deferred until there's an online serving path (Phase 3) — same schema, so it's
+  a backend swap, not an API change.
+- **Walk-forward validation** (`quantis/research/walkforward.py`) — rolling/expanding
+  train→test splits: grid selected on train (vectorized), evaluated OOS in the event
+  engine (risk gate on), OOS segments stitched into the only equity curve treated as
+  evidence. Plus block-bootstrap Monte Carlo (Sharpe/maxDD distributions) and the
+  deflated Sharpe ratio penalizing the number of trials.
+- **Experiment tracking** (`quantis/research/tracking.py`) — every backtest/walk-forward
+  logs params, metrics, and artifacts to MLflow when installed, else to a local JSONL
+  registry (`runs/experiments.jsonl`). The loop never depends on a tracking server.
+- **Research workspace** (`quantis ui`) — FastAPI (`/v1/...` per the TDD API spec) +
+  a terminal-style web UI: run risk-gated backtests, walk-forwards, browse the run
+  registry, and see vetoes broken down by risk rule.
+
+## What's in the MVP (Phase 1)
 
 - **Data lake** — daily NSE OHLCV as per-symbol Parquet (`quantis/data/`). Sources:
   Yahoo Finance (`.NS`, split/dividend-adjusted) or a deterministic synthetic generator
@@ -31,7 +52,7 @@ AI signals, live execution) extends it without a rewrite.
 ## Quickstart
 
 ```bash
-pip install -e ".[data,dev]"
+pip install -e ".[data,research,dev]"
 
 # 1. Ingest data (real NSE via Yahoo, or --source synthetic for offline)
 quantis ingest --source yahoo --start 2018-01-01
@@ -44,8 +65,15 @@ quantis backtest --strategy ma_crossover --param fast=10 --param slow=100
 # 3. Parameter sweep (vectorized), then validate the winner in the event engine
 quantis sweep --strategy ma_crossover --grid fast=10,20,50 --grid slow=50,100,200
 
+# 4. Walk-forward validation — out-of-sample evidence, Monte Carlo, deflated Sharpe
+quantis walkforward --strategy momentum --grid top_n=5,10 --grid rebalance_days=21,42
+
+# 5. Feature store + research workspace
+quantis materialize                          # versioned point-in-time feature tables
+quantis ui                                   # http://127.0.0.1:8000
+
 quantis list
-pytest                                        # cost model, risk rules, look-ahead checks
+pytest                                        # cost model, risk rules, look-ahead, PIT store, walk-forward
 ```
 
 ## Design commitments carried from the TDD
@@ -61,8 +89,8 @@ pytest                                        # cost model, risk rules, look-ahe
 
 ## Roadmap (from the TDD, Part 16)
 
-1. **MVP (this repo)** — data, features, backtester, strategy templates, risk limits ✅
-2. Research platform — feature store (Feast), walk-forward validation, MLflow, research UI
+1. **MVP** — data, features, backtester, strategy templates, risk limits ✅
+2. **Research platform** — feature store, walk-forward validation, experiment tracking, research UI ✅
 3. Paper trading — real-time feed, simulated broker adapter, OMS/EMS skeleton, full limit set
 4. AI integration — GBT + sequence models, model registry, shadow-mode promotion, LLM copilot
 5. Live trading — broker connectors (Zerodha/Upstox), reconciliation, circuit breakers, SEBI audit tagging

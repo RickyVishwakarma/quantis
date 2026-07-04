@@ -7,7 +7,9 @@ dist/
 .venv/
 venv/
 data/lake/
+data/feature_store/
 runs/
+mlruns/
 .pytest_cache/
 .ipynb_checkpoints/
 *.parquet

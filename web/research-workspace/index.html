@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QUANTIS · Research Workspace</title>
+<style>
+  :root {
+    --bg: #0d0e12; --panel: #14161c; --border: #262a33; --text: #d7dae0;
+    --dim: #7a8090; --gold: #c9a86a; --green: #4cc38a; --red: #e5534b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 13px/1.5 "Cascadia Mono", "JetBrains Mono", Consolas, monospace; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 10px 18px; border-bottom: 1px solid var(--border);
+           background: var(--panel); }
+  header h1 { font-size: 14px; letter-spacing: 3px; color: var(--gold); font-weight: 600; }
+  header .status { color: var(--dim); font-size: 12px; }
+  .layout { display: grid; grid-template-columns: 170px 1fr; min-height: calc(100vh - 45px); }
+  nav { border-right: 1px solid var(--border); padding: 16px 0; background: var(--panel); }
+  nav a { display: block; padding: 8px 18px; color: var(--dim); text-decoration: none;
+          letter-spacing: 1.5px; font-size: 11px; cursor: pointer; }
+  nav a.active, nav a:hover { color: var(--gold); background: #1a1d25;
+          border-left: 2px solid var(--gold); }
+  main { padding: 18px; display: grid; gap: 16px; align-content: start; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 4px; padding: 14px 16px; }
+  .panel h2 { font-size: 11px; letter-spacing: 2px; color: var(--dim);
+              margin-bottom: 12px; font-weight: 600; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > .panel { flex: 1; min-width: 320px; }
+  label { color: var(--dim); font-size: 11px; display: block; margin: 8px 0 2px; }
+  input, select { background: #0f1116; color: var(--text); border: 1px solid var(--border);
+          border-radius: 3px; padding: 6px 8px; font: inherit; width: 100%; }
+  button { background: var(--gold); color: #14161c; border: 0; border-radius: 3px;
+           padding: 8px 18px; font: inherit; font-weight: 700; letter-spacing: 1px;
+           cursor: pointer; margin-top: 12px; }
+  button:disabled { opacity: .4; cursor: wait; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--dim); font-weight: 600; padding: 4px 8px;
+       border-bottom: 1px solid var(--border); letter-spacing: 1px; font-size: 10px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #1c1f27; }
+  tr.clickable:hover { background: #1a1d25; cursor: pointer; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+             gap: 10px; }
+  .metric { background: #0f1116; border: 1px solid var(--border); border-radius: 3px;
+            padding: 8px 10px; }
+  .metric .k { color: var(--dim); font-size: 10px; letter-spacing: 1px; }
+  .metric .v { font-size: 16px; margin-top: 2px; }
+  canvas { width: 100%; height: 260px; background: #0f1116; border: 1px solid var(--border);
+           border-radius: 3px; }
+  #log { color: var(--dim); font-size: 11px; white-space: pre-wrap; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>QUANTIS · RESEARCH WORKSPACE</h1>
+  <div class="status" id="lakeStatus">lake: …</div>
+</header>
+<div class="layout">
+  <nav>
+    <a class="active" data-view="backtest">BACKTEST</a>
+    <a data-view="walkforward">WALK-FORWARD</a>
+    <a data-view="runs">RUNS</a>
+  </nav>
+  <main>
+    <!-- BACKTEST VIEW -->
+    <section id="view-backtest">
+      <div class="row">
+        <div class="panel" style="max-width:360px">
+          <h2>EVENT BACKTEST · RISK-GATED</h2>
+          <label>strategy</label><select id="btStrategy"></select>
+          <label>params (json)</label><input id="btParams" value="{}">
+          <label>start</label><input id="btStart" value="2020-01-01">
+          <label>capital (INR)</label><input id="btCapital" value="1000000">
+          <button id="btRun">RUN BACKTEST</button>
+          <p id="log"></p>
+        </div>
+        <div class="panel">
+          <h2>RESULT</h2>
+          <div class="metrics" id="btMetrics"></div>
+          <div style="height:12px"></div>
+          <canvas id="btChart" width="900" height="260"></canvas>
+          <div style="height:12px"></div>
+          <div id="btRisk" class="metrics"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- WALK-FORWARD VIEW -->
+    <section id="view-walkforward" class="hidden">
+      <div class="row">
+        <div class="panel" style="max-width:360px">
+          <h2>WALK-FORWARD VALIDATION</h2>
+          <label>strategy</label><select id="wfStrategy"></select>
+          <label>grid (json, e.g. {"fast":[10,20],"slow":[100,200]})</label>
+          <input id="wfGrid" value='{"top_n":[5,10],"rebalance_days":[21]}'>
+          <label>train days</label><input id="wfTrain" value="504">
+          <label>test days</label><input id="wfTest" value="126">
+          <button id="wfRun">RUN WALK-FORWARD</button>
+          <p id="wfLog"></p>
+        </div>
+        <div class="panel">
+          <h2>OUT-OF-SAMPLE (STITCHED) — THE ONLY EVIDENCE</h2>
+          <div class="metrics" id="wfMetrics"></div>
+          <div style="height:12px"></div>
+          <canvas id="wfChart" width="900" height="260"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>WINDOWS</h2>
+        <div id="wfWindows"></div>
+      </div>
+    </section>
+
+    <!-- RUNS VIEW -->
+    <section id="view-runs" class="hidden">
+      <div class="panel">
+        <h2>RUN REGISTRY</h2>
+        <div id="runsTable"></div>
+      </div>
+      <div class="panel">
+        <h2>SELECTED RUN</h2>
+        <div class="metrics" id="runMetrics"></div>
+        <div style="height:12px"></div>
+        <canvas id="runChart" width="900" height="260"></canvas>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmtPct = v => v == null ? "–" : (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
+const fmtNum = v => v == null ? "–" : (+v).toFixed(2);
+
+function metricCards(el, entries) {
+  el.innerHTML = entries.map(([k, v, cls]) =>
+    `<div class="metric"><div class="k">${k}</div>
+     <div class="v ${cls || ""}">${v}</div></div>`).join("");
+}
+
+function drawLine(canvas, ts, vals) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height, P = 42;
+  ctx.clearRect(0, 0, W, H);
+  if (!vals || vals.length < 2) return;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const x = i => P + (W - P - 10) * i / (vals.length - 1);
+  const y = v => H - 24 - (H - 44) * (v - min) / ((max - min) || 1);
+  ctx.strokeStyle = "#262a33"; ctx.fillStyle = "#7a8090"; ctx.font = "10px monospace";
+  for (let g = 0; g <= 4; g++) {
+    const v = min + (max - min) * g / 4, yy = y(v);
+    ctx.beginPath(); ctx.moveTo(P, yy); ctx.lineTo(W - 10, yy); ctx.stroke();
+    ctx.fillText((v / 1000).toFixed(0) + "k", 4, yy + 3);
+  }
+  ctx.fillText(ts[0], P, H - 8);
+  ctx.fillText(ts[ts.length - 1], W - 90, H - 8);
+  ctx.strokeStyle = vals[vals.length - 1] >= vals[0] ? "#4cc38a" : "#e5534b";
+  ctx.lineWidth = 1.5; ctx.beginPath();
+  vals.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v)));
+  ctx.stroke();
+}
+
+function renderTable(el, rows, cols, onClick) {
+  if (!rows.length) { el.innerHTML = '<p id="log">no rows</p>'; return; }
+  const head = cols.map(c => `<th>${c.toUpperCase()}</th>`).join("");
+  const body = rows.map((r, i) =>
+    `<tr class="${onClick ? "clickable" : ""}" data-i="${i}">` +
+    cols.map(c => {
+      let v = r[c];
+      if (typeof v === "number" && ["sharpe","is_sharpe","oos_sharpe"].includes(c)) v = fmtNum(v);
+      else if (typeof v === "number" && ["cagr","max_drawdown","oos_return"].includes(c)) v = fmtPct(v);
+      return `<td>${v ?? "–"}</td>`;
+    }).join("") + "</tr>").join("");
+  el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  if (onClick) el.querySelectorAll("tr.clickable").forEach(tr =>
+    tr.onclick = () => onClick(rows[+tr.dataset.i]));
+}
+
+// ---- nav ----
+document.querySelectorAll("nav a").forEach(a => a.onclick = () => {
+  document.querySelectorAll("nav a").forEach(x => x.classList.remove("active"));
+  a.classList.add("active");
+  ["backtest","walkforward","runs"].forEach(v =>
+    $("view-" + v).classList.toggle("hidden", v !== a.dataset.view));
+  if (a.dataset.view === "runs") loadRuns();
+});
+
+// ---- init ----
+async function init() {
+  const lake = await (await fetch("/v1/lake")).json();
+  $("lakeStatus").textContent =
+    `lake: ${lake.n_symbols} symbols · ${lake.start ?? "?"} → ${lake.end ?? "?"}`;
+  const strats = await (await fetch("/v1/strategies")).json();
+  for (const sel of [$("btStrategy"), $("wfStrategy")]) {
+    sel.innerHTML = strats.map(s => `<option>${s.name}</option>`).join("");
+    sel.onchange = () => {
+      const s = strats.find(x => x.name === sel.value);
+      if (sel === $("btStrategy")) $("btParams").value = JSON.stringify(s.default_params);
+      else $("wfGrid").value = JSON.stringify(
+        Object.fromEntries(Object.entries(s.default_params)
+          .filter(([,v]) => typeof v === "number").map(([k,v]) => [k,[v]])));
+    };
+  }
+  $("btStrategy").onchange();
+  $("wfStrategy").onchange();
+}
+
+// ---- backtest ----
+$("btRun").onclick = async () => {
+  $("btRun").disabled = true; $("log").textContent = "running event backtest…";
+  try {
+    const res = await fetch("/v1/backtests", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        strategy: $("btStrategy").value,
+        params: JSON.parse($("btParams").value || "{}"),
+        start: $("btStart").value || null,
+        capital: +$("btCapital").value,
+      })});
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const { run_id, metrics } = await res.json();
+    $("log").textContent = "run: " + run_id;
+    metricCards($("btMetrics"), [
+      ["SHARPE", fmtNum(metrics.sharpe)],
+      ["CAGR", fmtPct(metrics.cagr), metrics.cagr >= 0 ? "pos" : "neg"],
+      ["MAX DD", fmtPct(metrics.max_drawdown), "neg"],
+      ["SORTINO", fmtNum(metrics.sortino)],
+      ["CALMAR", fmtNum(metrics.calmar)],
+      ["WIN RATE", fmtPct(metrics.win_rate)],
+      ["TRADES", metrics.n_trades ?? "–"],
+      ["COSTS", "Rs " + Math.round(metrics.total_costs ?? 0).toLocaleString()],
+    ]);
+    const detail = await (await fetch("/v1/runs/" + run_id)).json();
+    drawLine($("btChart"), detail.equity.ts, detail.equity.value);
+    const risk = detail.risk || {};
+    metricCards($("btRisk"), [
+      ["ORDERS GATED", risk.evaluated ?? 0],
+      ["VETOED", risk.rejected ?? 0, "neg"],
+      ...Object.entries(risk.by_rule || {}).map(([k, v]) => [k.toUpperCase(), v, "neg"]),
+    ]);
+  } catch (e) { $("log").textContent = "error: " + e.message; }
+  $("btRun").disabled = false;
+};
+
+// ---- walk-forward ----
+$("wfRun").onclick = async () => {
+  $("wfRun").disabled = true;
+  $("wfLog").textContent = "running walk-forward (train → select → OOS test per window)…";
+  try {
+    const res = await fetch("/v1/walkforward", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        strategy: $("wfStrategy").value,
+        grid: JSON.parse($("wfGrid").value || "{}"),
+        train_days: +$("wfTrain").value, test_days: +$("wfTest").value,
+      })});
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const wf = await res.json();
+    $("wfLog").textContent =
+      `${wf.n_windows} windows · ${wf.n_trials} trials deflated`;
+    const m = wf.oos_metrics, mc = wf.monte_carlo;
+    metricCards($("wfMetrics"), [
+      ["OOS SHARPE", fmtNum(m.sharpe)],
+      ["DEFLATED SR (P>0)", fmtPct(wf.deflated_sharpe)],
+      ["OOS CAGR", fmtPct(m.cagr), m.cagr >= 0 ? "pos" : "neg"],
+      ["OOS MAX DD", fmtPct(m.max_drawdown), "neg"],
+      ["MC SHARPE P5–P95", `${fmtNum(mc.sharpe_p05)} … ${fmtNum(mc.sharpe_p95)}`],
+      ["P(SHARPE<0)", fmtPct(mc.prob_sharpe_negative), "neg"],
+    ]);
+    drawLine($("wfChart"), wf.oos_equity.ts, wf.oos_equity.value);
+    const cols = Object.keys(wf.windows[0] || {});
+    renderTable($("wfWindows"), wf.windows, cols);
+  } catch (e) { $("wfLog").textContent = "error: " + e.message; }
+  $("wfRun").disabled = false;
+};
+
+// ---- runs ----
+async function loadRuns() {
+  const runs = await (await fetch("/v1/runs")).json();
+  renderTable($("runsTable"), runs,
+    ["run_id", "strategy", "sharpe", "cagr", "max_drawdown", "n_trades"],
+    async r => {
+      const d = await (await fetch("/v1/runs/" + r.run_id)).json();
+      const m = d.metrics;
+      metricCards($("runMetrics"), [
+        ["SHARPE", fmtNum(m.sharpe)], ["CAGR", fmtPct(m.cagr)],
+        ["MAX DD", fmtPct(m.max_drawdown), "neg"], ["SORTINO", fmtNum(m.sortino)],
+        ["WIN RATE", fmtPct(m.win_rate)], ["TRADES", m.n_trades ?? "–"],
+      ]);
+      drawLine($("runChart"), d.equity.ts, d.equity.value);
+    });
+}
+
+init();
+</script>
+</body>
+</html>
