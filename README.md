@@ -1,10 +1,42 @@
 # Quantis
 
 AI quantitative research and execution platform for Indian equities and derivatives.
-This repo implements **Phases 1–3** of the Quantis TDD: research loop (data → feature
-store → strategy → walk-forward → risk-gated backtest → tracked experiment) plus paper
-trading through a real OMS/EMS against a simulated broker — the exact architecture that
-goes live in Phase 5 with only the broker adapter swapped.
+This repo implements **Phases 1–4** of the Quantis TDD: the research loop, paper trading
+through a real OMS/EMS, and AI signal generation with a governed model lifecycle —
+every AI order transits the same risk gate as every template strategy.
+
+## Phase 4 — AI integration
+
+- **Signal models** (`quantis/ai/models.py`) — one contract (`fit / predict /
+  attribution`): a dependency-free closed-form ridge baseline (prediction == sum of
+  contributions, exactly attributable) and LightGBM (`pip install "quantis[ai]"`,
+  SHAP-style attribution). Many small understood signals, per the TDD, not one opaque net.
+- **Training pipeline** (`quantis/ai/train.py`) — training frames from the feature store
+  (PIT features, strictly-future labels), date-based splits (never shuffled), and
+  promotion to CANDIDATE only if validation IC beats a naive momentum baseline.
+- **Model registry** (`quantis/ai/registry.py`) — the TDD stage lifecycle
+  `EXPERIMENTAL → CANDIDATE → SHADOW → PRODUCTION → RETIRED`, enforced: no stage
+  skipping, PRODUCTION requires a shadow report **and** human `--approved-by`,
+  one PRODUCTION model per name, `feature_schema_version` pinned on every entry.
+- **Shadow mode** (`quantis/ai/shadow.py`) — infer, don't trade: recent-window
+  hypothetical performance, realized IC, benchmark comparison, sanity-bound rejections.
+- **AI strategy plug-in** (`quantis/strategies/ai_signal.py`) — model scores → weights
+  through the standard Strategy interface, with the TDD's AI safeguards: out-of-
+  distribution predictions are zeroed (hallucination bound), `gross_cap` limits any one
+  model's share of the book, and `explain()` ships feature attribution with every pick.
+- **AI copilot** (`quantis/ai/copilot.py`, `POST /v1/copilot/query`) — Claude answering
+  questions grounded in live platform state (lake, runs, registry, risk status);
+  degrades to a deterministic local summary without an API key. Strictly read-only.
+- **UI** — MODELS view (registry, stages, shadow reports, promote-with-sign-off) and
+  AI COPILOT view in the research workspace.
+
+```bash
+quantis ai train --model gbt --label-horizon 5
+quantis ai shadow --model <id> --days 126
+quantis ai promote --model <id> --to PRODUCTION --approved-by ricky
+quantis backtest --strategy ai_signal --param model_id=<id>
+quantis ai ask "which model should go to production?"
+```
 
 ## Phase 3 — paper trading
 
@@ -121,7 +153,8 @@ pytest                                        # cost model, risk rules, look-ahe
 1. **MVP** — data, features, backtester, strategy templates, risk limits ✅
 2. **Research platform** — feature store, walk-forward validation, experiment tracking, research UI ✅
 3. **Paper trading** — replay/delayed feed, simulated broker adapter, OMS/EMS, full limit set ✅
-4. AI integration — GBT + sequence models, model registry, shadow-mode promotion, LLM copilot
+4. **AI integration** — GBT + ridge signal models, model registry, shadow-mode promotion, LLM copilot ✅
+   (deferred to later: deep sequence models — the registry/promotion pipeline is model-agnostic)
 5. Live trading — broker connectors (Zerodha/Upstox), reconciliation, circuit breakers, SEBI audit tagging
 6. Institutional — multi-asset, multi-tenant RBAC, strategy marketplace, white-label API
 

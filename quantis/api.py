@@ -57,8 +57,19 @@ class WalkForwardRequest(BaseModel):
     capital: float = 1_000_000.0
 
 
+class PromoteRequest(BaseModel):
+    to: str
+    approved_by: str | None = None
+
+
+class CopilotRequest(BaseModel):
+    prompt: str
+    use_llm: bool = True
+
+
 def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
-               paper_root: str = "paper_sessions") -> FastAPI:
+               paper_root: str = "paper_sessions",
+               registry_root: str = "models") -> FastAPI:
     app = FastAPI(title="Quantis Research API", version="0.2.0")
 
     def load_wide(start=None, end=None):
@@ -256,6 +267,37 @@ def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
             "final_positions": session.final_positions,
             "reconciliation": session.reconciliation,
         }
+
+    @app.get("/v1/models")
+    def list_models():
+        from .ai.registry import ModelRegistry
+        return [
+            {k: e.get(k) for k in ("model_id", "name", "version", "stage",
+                                   "metrics", "shadow_report", "approved_by",
+                                   "trained_at")}
+            for e in ModelRegistry(registry_root).list_models()
+        ]
+
+    @app.post("/v1/models/{model_id}/promote")
+    def promote_model(model_id: str, req: PromoteRequest):
+        from .ai.registry import ModelRegistry, PromotionError
+        try:
+            entry = ModelRegistry(registry_root).promote(
+                model_id, req.to, approved_by=req.approved_by
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except (PromotionError, ValueError) as e:
+            raise HTTPException(422, str(e))
+        return {"model_id": entry["model_id"], "stage": entry["stage"],
+                "approved_by": entry["approved_by"]}
+
+    @app.post("/v1/copilot/query")
+    def copilot_query(req: CopilotRequest):
+        from .ai.copilot import ask, build_context
+        ctx = build_context(lake_root=lake_root, runs_root=runs_root,
+                            registry_root=registry_root, paper_root=paper_root)
+        return ask(req.prompt, context=ctx, use_llm=req.use_llm)
 
     @app.get("/")
     def index():

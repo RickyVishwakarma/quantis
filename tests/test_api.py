@@ -16,8 +16,23 @@ def client(tmp_path_factory):
     lake = BarLake(root / "lake")
     lake.save_bars(generate_synthetic(SYMS, start="2021-01-01", end="2023-12-31", seed=9))
     app = create_app(lake_root=str(root / "lake"), runs_root=str(root / "runs"),
-                     paper_root=str(root / "paper_sessions"))
+                     paper_root=str(root / "paper_sessions"),
+                     registry_root=str(root / "models"))
     return TestClient(app)
+
+
+def test_models_endpoint_and_promotion_gate(client):
+    assert client.get("/v1/models").json() == []
+    assert client.post("/v1/models/nope/promote",
+                       json={"to": "CANDIDATE"}).status_code == 404
+
+
+def test_copilot_endpoint_local_backend(client):
+    res = client.post("/v1/copilot/query",
+                      json={"prompt": "how many symbols?", "use_llm": False})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["backend"] == "local" and body["answer"]
 
 
 def test_strategies_endpoint(client):

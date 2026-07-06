@@ -44,11 +44,25 @@ def test_features_are_point_in_time(bars):
 
 
 @pytest.mark.parametrize("strategy_name", strategies.available())
-def test_strategy_weights_are_point_in_time(bars, strategy_name):
+def test_strategy_weights_are_point_in_time(bars, strategy_name, tmp_path):
     cutoff = pd.Timestamp("2022-12-30")
     panel_a = compute_features(to_wide(bars))
     panel_b = compute_features(to_wide(_perturbed(bars, cutoff)))
-    strat = strategies.get(strategy_name)()
+
+    params = {}
+    if strategy_name == "ai_signal":
+        # AI predictions must be as point-in-time as any feature: train a
+        # throwaway model and run the same perturbation check through it
+        from quantis.ai.train import train_and_register
+        entry = train_and_register(
+            to_wide(bars), model_type="ridge",
+            fstore_root=str(tmp_path / "fstore"),
+            registry_root=str(tmp_path / "models"),
+        )
+        params = {"model_id": entry["model_id"],
+                  "registry_root": str(tmp_path / "models")}
+
+    strat = strategies.get(strategy_name)(**params)
     w_a = strat.target_weights(panel_a).loc[:cutoff]
     w_b = strat.target_weights(panel_b).loc[:cutoff]
     pd.testing.assert_frame_equal(w_a, w_b, check_exact=True)

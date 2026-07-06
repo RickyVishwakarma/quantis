@@ -27,4 +27,4 @@ def available() -> list[str]:
 
 
 # Import built-ins so they self-register
-from . import momentum, ma_crossover, mean_reversion  # noqa: E402,F401
+from . import ai_signal, momentum, ma_crossover, mean_reversion  # noqa: E402,F401

@@ -65,6 +65,8 @@
     <a class="active" data-view="backtest">BACKTEST</a>
     <a data-view="walkforward">WALK-FORWARD</a>
     <a data-view="paper">PAPER TRADING</a>
+    <a data-view="models">MODELS</a>
+    <a data-view="copilot">AI COPILOT</a>
     <a data-view="runs">RUNS</a>
   </nav>
   <main>
@@ -147,6 +149,33 @@
       </div>
     </section>
 
+    <!-- MODELS VIEW -->
+    <section id="view-models" class="hidden">
+      <div class="panel">
+        <h2>MODEL REGISTRY · EXPERIMENTAL → CANDIDATE → SHADOW → PRODUCTION</h2>
+        <div id="modelsTable"></div>
+        <p id="mdLog" style="color:var(--dim);font-size:11px;margin-top:10px"></p>
+      </div>
+      <div class="panel">
+        <h2>SELECTED MODEL</h2>
+        <div class="metrics" id="mdMetrics"></div>
+        <pre id="mdShadow" style="color:var(--dim);font-size:11px;margin-top:10px;white-space:pre-wrap"></pre>
+        <button id="mdPromote" class="hidden">PROMOTE</button>
+      </div>
+    </section>
+
+    <!-- COPILOT VIEW -->
+    <section id="view-copilot" class="hidden">
+      <div class="panel">
+        <h2>AI COPILOT · GROUNDED IN PLATFORM STATE · READ-ONLY</h2>
+        <label>question</label>
+        <input id="cpPrompt" value="Which strategy looks most promising out of sample, and what should I do next?">
+        <button id="cpAsk">ASK</button>
+        <p id="cpBackend" style="color:var(--dim);font-size:11px;margin-top:10px"></p>
+        <pre id="cpAnswer" style="color:var(--text);font-size:12px;margin-top:8px;white-space:pre-wrap;line-height:1.6"></pre>
+      </div>
+    </section>
+
     <!-- RUNS VIEW -->
     <section id="view-runs" class="hidden">
       <div class="panel">
@@ -216,11 +245,88 @@ function renderTable(el, rows, cols, onClick) {
 document.querySelectorAll("nav a").forEach(a => a.onclick = () => {
   document.querySelectorAll("nav a").forEach(x => x.classList.remove("active"));
   a.classList.add("active");
-  ["backtest","walkforward","paper","runs"].forEach(v =>
+  ["backtest","walkforward","paper","models","copilot","runs"].forEach(v =>
     $("view-" + v).classList.toggle("hidden", v !== a.dataset.view));
   if (a.dataset.view === "runs") loadRuns();
   if (a.dataset.view === "paper") loadPaperSessions();
+  if (a.dataset.view === "models") loadModels();
 });
+
+// ---- models ----
+let selectedModel = null;
+async function loadModels() {
+  const models = await (await fetch("/v1/models")).json();
+  if (!models.length) {
+    $("modelsTable").innerHTML =
+      '<p id="log">registry empty — run `quantis ai train`</p>';
+    return;
+  }
+  const rows = models.map(m => ({
+    model_id: m.model_id, name: m.name, version: m.version, stage: m.stage,
+    ic: (m.metrics || {}).ic, approved_by: m.approved_by || "–",
+    _raw: m,
+  }));
+  renderTable($("modelsTable"), rows,
+    ["model_id", "name", "version", "stage", "ic", "approved_by"],
+    r => showModel(r._raw));
+}
+
+const NEXT_STAGE = { EXPERIMENTAL: "CANDIDATE", CANDIDATE: "SHADOW",
+                     SHADOW: "PRODUCTION" };
+function showModel(m) {
+  selectedModel = m;
+  const met = m.metrics || {};
+  metricCards($("mdMetrics"), [
+    ["NAME", `${m.name} v${m.version}`],
+    ["STAGE", m.stage, m.stage === "PRODUCTION" ? "pos" : ""],
+    ["VALIDATION IC", met.ic ?? "–"],
+    ["HIT RATE", fmtPct(met.hit_rate)],
+    ["BASELINE IC", met.baseline_ic ?? "–"],
+    ["APPROVED BY", m.approved_by || "–"],
+  ]);
+  $("mdShadow").textContent = m.shadow_report
+    ? "SHADOW REPORT\n" + JSON.stringify(m.shadow_report, null, 2)
+    : "no shadow report yet — run `quantis ai shadow --model " + m.model_id + "`";
+  const next = NEXT_STAGE[m.stage];
+  $("mdPromote").classList.toggle("hidden", !next);
+  if (next) $("mdPromote").textContent = "PROMOTE → " + next;
+}
+
+$("mdPromote").onclick = async () => {
+  if (!selectedModel) return;
+  const to = NEXT_STAGE[selectedModel.stage];
+  let approved_by = null;
+  if (to === "PRODUCTION") {
+    approved_by = prompt("PRODUCTION requires human sign-off. Your name:");
+    if (!approved_by) return;
+  }
+  const res = await fetch(`/v1/models/${selectedModel.model_id}/promote`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ to, approved_by }),
+  });
+  const body = await res.json();
+  $("mdLog").textContent = res.ok
+    ? `promoted to ${body.stage}` : "refused: " + body.detail;
+  loadModels();
+};
+
+// ---- copilot ----
+$("cpAsk").onclick = async () => {
+  $("cpAsk").disabled = true;
+  $("cpBackend").textContent = "thinking…";
+  $("cpAnswer").textContent = "";
+  try {
+    const res = await fetch("/v1/copilot/query", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ prompt: $("cpPrompt").value }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail);
+    const body = await res.json();
+    $("cpBackend").textContent = "backend: " + body.backend;
+    $("cpAnswer").textContent = body.answer;
+  } catch (e) { $("cpBackend").textContent = "error: " + e.message; }
+  $("cpAsk").disabled = false;
+};
 
 // ---- init ----
 async function init() {

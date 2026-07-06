@@ -262,6 +262,92 @@ def cmd_materialize(args) -> int:
     return 0
 
 
+def cmd_ai_train(args) -> int:
+    from .ai.train import train_and_register
+    from .research import get_tracker
+
+    wide = _load_wide(args)
+    print(f"Training {args.model} model, label = fwd {args.label_horizon}d return, "
+          f"{len(wide['close'].columns)} symbols, {len(wide['close'])} bars…")
+    entry = train_and_register(
+        wide, model_type=args.model, label_horizon=args.label_horizon,
+        train_frac=args.train_frac,
+    )
+    m = entry["metrics"]
+    print(f"\nModel {entry['name']} v{entry['version']}  ({entry['model_id']})")
+    print(f"  stage              {entry['stage']}")
+    print(f"  validation IC      {m['ic']}   (baseline momentum IC: {m['baseline_ic']})")
+    print(f"  hit rate           {m['hit_rate']:.1%}")
+    print(f"  top-bottom spread  {m['top_bottom_spread']:+.4%} per {args.label_horizon}d")
+    print(f"  rows train/val     {m['n_train_rows']} / {m['n_val_rows']}")
+    if entry["stage"] == "CANDIDATE":
+        print("\nBeat the baseline -> promoted to CANDIDATE. "
+              "Next: `quantis ai shadow --model " + entry["model_id"] + "`")
+    else:
+        print("\nDid NOT beat the baseline -> stays EXPERIMENTAL.")
+    get_tracker().log_run(
+        name=f"train_{entry['name']}", params={"model_type": args.model,
+                                               "label_horizon": args.label_horizon},
+        metrics={k: v for k, v in m.items() if isinstance(v, (int, float))},
+        tags={"engine": "ai_train", "model_id": entry["model_id"]},
+    )
+    return 0
+
+
+def cmd_ai_models(args) -> int:
+    from .ai.registry import ModelRegistry
+
+    models = ModelRegistry(args.registry).list_models()
+    if not models:
+        print("Registry empty — run `quantis ai train`.")
+        return 0
+    for e in models:
+        m = e.get("metrics", {})
+        shadow = " +shadow" if e.get("shadow_report") else ""
+        print(f"{e['model_id']}  {e['name']:<18} v{e['version']}  "
+              f"{e['stage']:<12} IC={m.get('ic')}{shadow}"
+              + (f"  approved_by={e['approved_by']}" if e.get("approved_by") else ""))
+    return 0
+
+
+def cmd_ai_shadow(args) -> int:
+    from .ai.shadow import run_shadow
+
+    wide = _load_wide(args)
+    print(f"Shadow mode (infer, don't trade): model {args.model}, "
+          f"{args.days} day window…")
+    report = run_shadow(wide, args.model, shadow_days=args.days)
+    for k, v in report.items():
+        print(f"  {k:<34} {v}")
+    print("\nModel moved to SHADOW. Promote with:")
+    print(f"  quantis ai promote --model {args.model} --to PRODUCTION --approved-by <you>")
+    return 0
+
+
+def cmd_ai_promote(args) -> int:
+    from .ai.registry import ModelRegistry, PromotionError
+
+    try:
+        entry = ModelRegistry(args.registry).promote(
+            args.model, args.to, approved_by=args.approved_by
+        )
+    except (PromotionError, KeyError) as e:
+        print(f"REFUSED: {e}")
+        return 1
+    print(f"{entry['name']} v{entry['version']} -> {entry['stage']}"
+          + (f" (approved by {entry['approved_by']})" if entry["approved_by"] else ""))
+    return 0
+
+
+def cmd_ai_ask(args) -> int:
+    from .ai.copilot import ask
+
+    result = ask(args.question, use_llm=not args.local)
+    print(f"[{result['backend']}]")
+    print(result["answer"])
+    return 0
+
+
 def cmd_ui(args) -> int:
     import uvicorn
 
@@ -338,6 +424,39 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--feature-store", default="data/feature_store")
     _add_common(p)
     p.set_defaults(fn=cmd_materialize)
+
+    p_ai = sub.add_parser("ai", help="model training, registry, shadow mode, copilot")
+    ai_sub = p_ai.add_subparsers(dest="ai_command", required=True)
+
+    p = ai_sub.add_parser("train", help="train a signal model from the feature store")
+    p.add_argument("--model", choices=["ridge", "gbt"], default="ridge")
+    p.add_argument("--label-horizon", type=int, default=5)
+    p.add_argument("--train-frac", type=float, default=0.75)
+    _add_common(p)
+    p.set_defaults(fn=cmd_ai_train)
+
+    p = ai_sub.add_parser("models", help="list the model registry")
+    p.add_argument("--registry", default="models")
+    p.set_defaults(fn=cmd_ai_models)
+
+    p = ai_sub.add_parser("shadow", help="shadow-mode evaluation (infer, don't trade)")
+    p.add_argument("--model", required=True, help="model_id or production:<name>")
+    p.add_argument("--days", type=int, default=126)
+    _add_common(p)
+    p.set_defaults(fn=cmd_ai_shadow)
+
+    p = ai_sub.add_parser("promote", help="stage promotion (PRODUCTION needs sign-off)")
+    p.add_argument("--model", required=True)
+    p.add_argument("--to", required=True,
+                   choices=["CANDIDATE", "SHADOW", "PRODUCTION", "RETIRED"])
+    p.add_argument("--approved-by", default=None)
+    p.add_argument("--registry", default="models")
+    p.set_defaults(fn=cmd_ai_promote)
+
+    p = ai_sub.add_parser("ask", help="ask the AI copilot about platform state")
+    p.add_argument("question")
+    p.add_argument("--local", action="store_true", help="skip the LLM, local summary only")
+    p.set_defaults(fn=cmd_ai_ask)
 
     p = sub.add_parser("ui", help="serve the research workspace + API")
     p.add_argument("--host", default="127.0.0.1")
