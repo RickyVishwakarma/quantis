@@ -64,6 +64,8 @@ class PaperTradingEngine:
         vol_targeting: bool = False,
         session_dir: str | Path | None = None,
         history_window: int | None = None,   # cap bars kept; None = full history
+        broker=None,                          # injected adapter; default sim
+        algo_id: str = "",                    # SEBI algo tag on every order
     ):                                        # (full history = exact backtest parity)
         self.strategy = strategy
         self.initial_capital = initial_capital
@@ -74,10 +76,11 @@ class PaperTradingEngine:
         self.min_trade_notional = min_trade_notional
         self.vol_targeting = vol_targeting
         self.session_dir = Path(session_dir) if session_dir else None
+        self.algo_id = algo_id
 
         self.oms = OMS(journal_dir=self.session_dir)
-        self.broker = SimulatedBroker(cost_model=self.costs,
-                                      starting_cash=initial_capital)
+        self.broker = broker or SimulatedBroker(cost_model=self.costs,
+                                                starting_cash=initial_capital)
         self.ems = EMS(oms=self.oms, broker=self.broker)
 
         self.history_window = history_window
@@ -103,6 +106,7 @@ class PaperTradingEngine:
         self.broker.on_bar(bar.ts, bar.open.to_dict())
         for fill in self.broker.poll_fills():
             self.oms.apply_fill(fill)
+            self._on_fill(fill)
         # Day-order semantics: whatever didn't fill at its bar is cancelled
         # (matches the backtester, which never carries an order overnight);
         # LIMIT orders are the exception — they rest until crossed.
@@ -163,25 +167,37 @@ class PaperTradingEngine:
                 symbol=sym, side="BUY" if delta > 0 else "SELL", qty=qty,
                 ref_price=float(px), ts=bar.ts,
                 strategy_id=self.strategy.describe(),
+                algo_id=self.algo_id,
             ))
         orders.sort(key=lambda o: 0 if o.side == "SELL" else 1)
 
         # 5. Risk gate -> OMS -> EMS -> broker (fills at next bar's open)
-        self.broker.set_adv(adv_row)
+        if hasattr(self.broker, "set_adv"):
+            self.broker.set_adv(adv_row)
         for mo in orders:
-            self.oms.submit(mo)
-            decision = self.risk.evaluate(
-                Order(symbol=mo.symbol, side=mo.side, qty=mo.qty,
-                      ref_price=mo.ref_price, ts=mo.ts),
-                state,
-            )
-            mo.risk_decision_id = decision.order_id
-            if not decision.approved:
-                self.oms.transition(mo.order_id, OrderStatus.RISK_REJECTED,
-                                    note=decision.breached_rule or "rejected")
-                continue
-            self.oms.transition(mo.order_id, OrderStatus.APPROVED)
-            self.ems.execute(mo, algo=self.execution_algo, slices=self.twap_slices)
+            self._gate_and_route(mo, state)
+
+    def _gate_and_route(self, mo: ManagedOrder, state: PortfolioState):
+        """Risk gate one order, then hand approved orders to the EMS.
+
+        Overridable hook: the live engine wraps this with audit logging."""
+        self.oms.submit(mo)
+        decision = self.risk.evaluate(
+            Order(symbol=mo.symbol, side=mo.side, qty=mo.qty,
+                  ref_price=mo.ref_price, ts=mo.ts),
+            state,
+        )
+        mo.risk_decision_id = decision.order_id
+        if not decision.approved:
+            self.oms.transition(mo.order_id, OrderStatus.RISK_REJECTED,
+                                note=decision.breached_rule or "rejected")
+            return decision
+        self.oms.transition(mo.order_id, OrderStatus.APPROVED)
+        self.ems.execute(mo, algo=self.execution_algo, slices=self.twap_slices)
+        return decision
+
+    def _on_fill(self, fill) -> None:
+        """Overridable hook: the live engine audits every fill."""
 
     # ------------------------------------------------------------------
     def finalize(self) -> PaperSession:
@@ -214,12 +230,18 @@ class PaperTradingEngine:
             for fldname in ["open", "high", "low", "close", "volume"]
         }
 
+    def _broker_cash(self) -> float:
+        cash = getattr(self.broker, "cash", None)     # sim tracks it directly
+        if cash is None:
+            cash = self.broker.margins().get("cash", 0.0)
+        return float(cash)
+
     def _mark_equity(self, bar: Bar) -> float:
         holdings = self.broker.positions()
         pos_val = sum(q * bar.close.get(s, float("nan"))
                       for s, q in holdings.items()
                       if not pd.isna(bar.close.get(s, float("nan"))))
-        equity = self.broker.cash + pos_val
+        equity = self._broker_cash() + pos_val
         self._equity_hist.append((bar.ts, equity))
         self._prev_day_ret = (equity / self._prev_equity - 1
                               if self._prev_equity > 0 else 0.0)
@@ -248,7 +270,7 @@ class PaperTradingEngine:
             "params": session.params,
             "execution_algo": self.execution_algo,
             "final_positions": session.final_positions,
-            "cash": self.broker.cash,
+            "cash": self._broker_cash(),
             "risk_status": session.risk_status,
             "metrics": {k: v for k, v in session.metrics.items()
                         if isinstance(v, (int, float, str))},

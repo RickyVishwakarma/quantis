@@ -249,6 +249,69 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def cmd_live(args) -> int:
+    from datetime import datetime
+
+    from .backtest.metrics import format_metrics
+    from .broker import SimulatedBroker, ZerodhaKiteBroker
+    from .feed import ReplayFeed
+    from .live import LiveTradingEngine
+
+    cls = strategies.get(args.strategy)
+    strat = cls(**_parse_params(args.param))
+
+    if args.broker == "zerodha":
+        broker = ZerodhaKiteBroker()        # needs KITE_API_KEY/KITE_ACCESS_TOKEN
+    else:
+        broker = SimulatedBroker(starting_cash=args.capital)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = f"live_sessions/{stamp}_{args.strategy}"
+    engine = LiveTradingEngine(
+        strategy=strat, broker=broker, armed=args.arm_live,
+        algo_id=args.algo_id, initial_capital=args.capital,
+        cost_model=NSECostModel(segment=args.segment),
+        risk_limits=RiskLimits(), session_dir=session_dir,
+    )
+
+    mode = ("ARMED — REAL ORDERS" if engine.armed
+            else "DRY RUN (no orders will reach the exchange)"
+            if args.broker == "zerodha" else "SIMULATED BROKER")
+    print(f"Live session: {strat.describe()}  [{mode}]")
+    if args.broker == "zerodha" and not args.arm_live:
+        print("  -> real broker detected but --arm-live not set; "
+              "orders are journaled, never placed.")
+
+    if args.feed == "delayed":
+        from .data import universe
+        from .feed.delayed import DelayedYahooFeed
+        syms = args.symbols.split(",") if args.symbols else universe.symbols(limit=25)
+        feed = DelayedYahooFeed(syms, poll_secs=args.poll_secs,
+                                max_polls=args.max_polls)
+        print(f"  delayed Yahoo feed, polling every {args.poll_secs}s "
+              f"(Ctrl-C to stop; session finalizes on exit)")
+        try:
+            session = engine.run(feed, warmup_bars=args.warmup)
+        except KeyboardInterrupt:
+            session = engine.finalize()
+    else:
+        wide = _load_wide(args)
+        session = engine.run(ReplayFeed(wide, start=args.start, end=args.end),
+                             warmup_bars=args.warmup)
+
+    print("\nLIVE SESSION REPORT")
+    print("=" * 50)
+    if session.metrics:
+        print(format_metrics(session.metrics))
+    print(f"\nRisk status       {session.risk_status}")
+    print(f"Reconciliation    {session.reconciliation}")
+    ok, bad = engine.audit.verify()
+    print(f"Audit chain       {'VERIFIED' if ok else f'BROKEN at seq {bad}'} "
+          f"({len(engine.audit.records())} records)")
+    print(f"\nArtifacts: {session.session_dir}")
+    return 0
+
+
 def cmd_materialize(args) -> int:
     from .fstore import FEATURE_SCHEMA_VERSION, FeatureStore
 
@@ -419,6 +482,23 @@ def main(argv: list[str] | None = None) -> int:
                    help="also run the event backtest and report divergence")
     _add_common(p)
     p.set_defaults(fn=cmd_paper)
+
+    p = sub.add_parser("live", help="live trading session (defaults to DRY RUN)")
+    p.add_argument("--strategy", required=True)
+    p.add_argument("--param", action="append", metavar="KEY=VAL")
+    p.add_argument("--broker", choices=["sim", "zerodha"], default="sim")
+    p.add_argument("--arm-live", action="store_true",
+                   help="place REAL orders (requires --algo-id; default is dry run)")
+    p.add_argument("--algo-id", default="",
+                   help="SEBI algo identifier tagged on every order")
+    p.add_argument("--capital", type=float, default=1_000_000.0)
+    p.add_argument("--segment", choices=["delivery", "intraday"], default="delivery")
+    p.add_argument("--feed", choices=["replay", "delayed"], default="replay")
+    p.add_argument("--poll-secs", type=float, default=300.0)
+    p.add_argument("--max-polls", type=int, default=None)
+    p.add_argument("--warmup", type=int, default=210)
+    _add_common(p)
+    p.set_defaults(fn=cmd_live)
 
     p = sub.add_parser("materialize", help="materialize features into the feature store")
     p.add_argument("--feature-store", default="data/feature_store")

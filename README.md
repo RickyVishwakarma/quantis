@@ -1,9 +1,40 @@
 # Quantis
 
 AI quantitative research and execution platform for Indian equities and derivatives.
-This repo implements **Phases 1–4** of the Quantis TDD: the research loop, paper trading
-through a real OMS/EMS, and AI signal generation with a governed model lifecycle —
-every AI order transits the same risk gate as every template strategy.
+This repo implements **Phases 1–5** of the Quantis TDD: research loop, paper trading,
+governed AI signals, and a live trading path that is **unarmed by default** — a real
+broker without an explicit `--arm-live` is auto-wrapped in a dry-run interlock.
+
+## Phase 5 — live trading
+
+- **Zerodha Kite adapter** (`quantis/broker/zerodha.py`) — the same `BrokerAdapter`
+  interface as the simulator, so paper → live is a constructor swap. Idempotent via
+  order tags: after a network timeout the adapter re-queries the order book by tag
+  before re-placing, so an order that actually landed is never double-executed
+  (tested). Incremental fill polling, retry with backoff, error counting into the
+  broker-error circuit breaker. Needs `pip install "quantis[live]"` +
+  `KITE_API_KEY` / `KITE_ACCESS_TOKEN`.
+- **Arming interlock** (`quantis/broker/dryrun.py`) — a real broker without
+  `armed=True` is wrapped in `DryRunBroker`: would-be orders are journaled, nothing
+  is ever placed, read-only calls (positions/margins) pass through so connectivity
+  and reconciliation are exercised for real. An armed session refuses to start
+  without a SEBI `--algo-id`.
+- **Audit service** (`quantis/audit/`) — append-only, hash-chained JSONL (TDD Part 13):
+  every risk decision, order transition, fill, reconciliation, and breaker event.
+  Tamper-evident: editing or deleting any record breaks `verify()` at that sequence
+  (tested). Survives restarts.
+- **Reconciliation cadence** — OMS-vs-broker diff at session start, every N bars, and
+  EOD (TDD Part 10). On an armed session, a mismatch trips the circuit breaker.
+- **Breaker response** — any breaker trip cancels all resting orders immediately and
+  audits the event; trading stays halted until a human resets (TDD Part 8).
+- **SEBI tagging** — `algo_id` rides on every order, into the broker tag and the audit
+  trail.
+
+```bash
+quantis live --strategy momentum --algo-id SEBI-XXX            # sim broker
+quantis live --strategy momentum --broker zerodha --algo-id SEBI-XXX   # DRY RUN
+quantis live --strategy momentum --broker zerodha --algo-id SEBI-XXX --arm-live  # real
+```
 
 ## Phase 4 — AI integration
 
@@ -155,7 +186,8 @@ pytest                                        # cost model, risk rules, look-ahe
 3. **Paper trading** — replay/delayed feed, simulated broker adapter, OMS/EMS, full limit set ✅
 4. **AI integration** — GBT + ridge signal models, model registry, shadow-mode promotion, LLM copilot ✅
    (deferred to later: deep sequence models — the registry/promotion pipeline is model-agnostic)
-5. Live trading — broker connectors (Zerodha/Upstox), reconciliation, circuit breakers, SEBI audit tagging
+5. **Live trading** — Zerodha connector, dry-run interlock, reconciliation, hash-chained audit, SEBI tagging ✅
+   (Upstox/Angel One follow the same `BrokerAdapter` pattern; delayed Yahoo feed for EOD strategies, licensed real-time feed later)
 6. Institutional — multi-asset, multi-tenant RBAC, strategy marketplace, white-label API
 
 Full design: `docs/` (Quantis TDD PDF).

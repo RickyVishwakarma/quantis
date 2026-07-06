@@ -70,6 +70,7 @@ class ManagedOrder:
     order_type: str = "MARKET"      # MARKET | LIMIT | TWAP
     limit_price: float | None = None
     strategy_id: str = ""
+    algo_id: str = ""               # SEBI algo tag — carried on every live order
     ref_price: float = 0.0          # decision-time price (risk sizing)
     ts: pd.Timestamp | None = None
     order_id: str = field(default_factory=lambda: str(uuid.uuid4()))

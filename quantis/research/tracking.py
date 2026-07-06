@@ -39,7 +39,9 @@ class LocalTracker:
     def log_run(self, name: str, params: dict, metrics: dict,
                 artifacts_dir: str | Path | None = None,
                 tags: dict | None = None) -> str:
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        import uuid
+        run_id = (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                  + "-" + uuid.uuid4().hex[:6])
         record = {
             "run_id": run_id,
             "name": name,

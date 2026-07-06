@@ -47,6 +47,19 @@ class BrokerAdapter(ABC):
     def margins(self) -> dict:
         """Broker's view of available funds."""
 
+    # ------------------------------------------------------------------
+    # Optional surface (simulation/bookkeeping); real adapters keep the
+    # no-ops — fills happen at the venue, not on our bar clock.
+    # ------------------------------------------------------------------
+    def on_bar(self, ts, open_prices: dict) -> int:
+        return 0
+
+    def pending_orders(self) -> dict:
+        return {}
+
+    def open_order_ids(self) -> set[str]:
+        return set()
+
 
 @dataclass
 class ReconciliationReport:
