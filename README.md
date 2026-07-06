@@ -1,193 +1,177 @@
 # Quantis
 
-AI quantitative research and execution platform for Indian equities and derivatives.
-This repo implements **Phases 1–5** of the Quantis TDD: research loop, paper trading,
-governed AI signals, and a live trading path that is **unarmed by default** — a real
-broker without an explicit `--arm-live` is auto-wrapped in a dry-run interlock.
+**An institutional-grade AI quantitative research and execution platform for Indian markets (NSE), built solo, end to end: data → features → backtest → walk-forward → paper trading → governed AI signals → (unarmed) live trading.**
 
-## Phase 5 — live trading
+[![tests](https://github.com/RickyVishwakarma/quantis/actions/workflows/ci.yml/badge.svg)](https://github.com/RickyVishwakarma/quantis/actions)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![tests](https://img.shields.io/badge/tests-119%20passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-- **Zerodha Kite adapter** (`quantis/broker/zerodha.py`) — the same `BrokerAdapter`
-  interface as the simulator, so paper → live is a constructor swap. Idempotent via
-  order tags: after a network timeout the adapter re-queries the order book by tag
-  before re-placing, so an order that actually landed is never double-executed
-  (tested). Incremental fill polling, retry with backoff, error counting into the
-  broker-error circuit breaker. Needs `pip install "quantis[live]"` +
-  `KITE_API_KEY` / `KITE_ACCESS_TOKEN`.
-- **Arming interlock** (`quantis/broker/dryrun.py`) — a real broker without
-  `armed=True` is wrapped in `DryRunBroker`: would-be orders are journaled, nothing
-  is ever placed, read-only calls (positions/margins) pass through so connectivity
-  and reconciliation are exercised for real. An armed session refuses to start
-  without a SEBI `--algo-id`.
-- **Audit service** (`quantis/audit/`) — append-only, hash-chained JSONL (TDD Part 13):
-  every risk decision, order transition, fill, reconciliation, and breaker event.
-  Tamper-evident: editing or deleting any record breaks `verify()` at that sequence
-  (tested). Survives restarts.
-- **Reconciliation cadence** — OMS-vs-broker diff at session start, every N bars, and
-  EOD (TDD Part 10). On an armed session, a mismatch trips the circuit breaker.
-- **Breaker response** — any breaker trip cancels all resting orders immediately and
-  audits the event; trading stays halted until a human resets (TDD Part 8).
-- **SEBI tagging** — `algo_id` rides on every order, into the broker tag and the audit
-  trail.
+Quantis is not a trading bot. It is the research-to-execution infrastructure a small
+quant desk would need — a risk engine with unconditional veto authority, an OMS/EMS with
+a real order-state machine, a governed ML model lifecycle, and a tamper-evident audit
+trail — implemented from a 27-page technical design document
+([`docs/quantisMVP.pdf`](docs/quantisMVP.pdf)) through its first five roadmap phases.
 
-```bash
-quantis live --strategy momentum --algo-id SEBI-XXX            # sim broker
-quantis live --strategy momentum --broker zerodha --algo-id SEBI-XXX   # DRY RUN
-quantis live --strategy momentum --broker zerodha --algo-id SEBI-XXX --arm-live  # real
+<p align="center">
+  <img src="docs/screenshots/backtest.png" width="900" alt="Risk-gated backtest in the research workspace"><br>
+  <em>Research workspace: risk-gated event backtest on real NSE data — note the veto breakdown by risk rule under the equity curve.</em>
+</p>
+
+## The honest numbers (and why they're the point)
+
+Most hobby trading projects show a beautiful in-sample equity curve. Quantis is built to
+**destroy** those curves before they cost money, and the real-data results show every
+layer doing its job:
+
+| What happened | Where |
+|---|---|
+| Momentum backtest: **+162%, Sharpe 0.70** in-sample (2020–2026, real NSE data) | `quantis backtest` |
+| The same strategy under walk-forward validation: **OOS Sharpe −0.19**, 27.8% bootstrap probability the true Sharpe is negative | `quantis walkforward` |
+| GBT signal model: validation IC 0.038, beat the momentum baseline (0.021) → CANDIDATE | `quantis ai train` |
+| Same model in shadow mode (most recent 6 months): **Sharpe −1.69, realized IC −0.008** → correctly **refused production** | `quantis ai shadow` |
+| Paper engine vs backtester, same inputs, full OMS/EMS/broker stack in between: **0.19% terminal-wealth gap** | parity test |
+| Live session demo: **2,815-record hash-chained audit trail, verified end-to-end**, incl. a circuit-breaker trip that cancelled resting orders and halted until manual reset | `quantis live` |
+
+The system's job is to make the gap between in-sample fantasy and out-of-sample reality
+visible *before* capital is at risk. It does.
+
+## Architecture
+
+Single Python package, module boundaries deliberately mirroring the TDD's service
+decomposition (each module extracts to a service when scale demands):
+
+```mermaid
+flowchart LR
+  subgraph Data plane
+    LAKE[(Parquet lake)] --> FEAT[PIT features]
+    FEAT --> FS[(Feature store<br/>as-of joins, versioned)]
+  end
+  subgraph Research plane
+    FS --> BT[Backtesters<br/>event + vectorized]
+    FS --> WF[Walk-forward<br/>deflated Sharpe, MC]
+    FS --> AI[Signal models<br/>ridge / GBT]
+    AI --> REG[(Model registry<br/>EXP→CAND→SHADOW→PROD)]
+  end
+  subgraph Decisioning
+    STRAT[Strategy plug-ins<br/>momentum · ma_cross · mean_rev · ai_signal] --> RISK{{RISK ENGINE<br/>unconditional veto}}
+  end
+  subgraph Execution plane
+    RISK -->|approved only| OMS[OMS<br/>order state machine]
+    OMS --> EMS[EMS<br/>immediate / TWAP]
+    EMS --> BRK[Broker adapter]
+    BRK --> SIM[Simulated]
+    BRK --> DRY[Dry-run interlock]
+    BRK --> KITE[Zerodha Kite]
+  end
+  REG --> STRAT
+  BT --> STRAT
+  OMS --> AUD[(Hash-chained<br/>audit log)]
+  RISK --> AUD
 ```
 
-## Phase 4 — AI integration
+**Non-negotiable invariants, enforced in code and covered by tests:**
 
-- **Signal models** (`quantis/ai/models.py`) — one contract (`fit / predict /
-  attribution`): a dependency-free closed-form ridge baseline (prediction == sum of
-  contributions, exactly attributable) and LightGBM (`pip install "quantis[ai]"`,
-  SHAP-style attribution). Many small understood signals, per the TDD, not one opaque net.
-- **Training pipeline** (`quantis/ai/train.py`) — training frames from the feature store
-  (PIT features, strictly-future labels), date-based splits (never shuffled), and
-  promotion to CANDIDATE only if validation IC beats a naive momentum baseline.
-- **Model registry** (`quantis/ai/registry.py`) — the TDD stage lifecycle
-  `EXPERIMENTAL → CANDIDATE → SHADOW → PRODUCTION → RETIRED`, enforced: no stage
-  skipping, PRODUCTION requires a shadow report **and** human `--approved-by`,
-  one PRODUCTION model per name, `feature_schema_version` pinned on every entry.
-- **Shadow mode** (`quantis/ai/shadow.py`) — infer, don't trade: recent-window
-  hypothetical performance, realized IC, benchmark comparison, sanity-bound rejections.
-- **AI strategy plug-in** (`quantis/strategies/ai_signal.py`) — model scores → weights
-  through the standard Strategy interface, with the TDD's AI safeguards: out-of-
-  distribution predictions are zeroed (hallucination bound), `gross_cap` limits any one
-  model's share of the book, and `explain()` ships feature attribution with every pick.
-- **AI copilot** (`quantis/ai/copilot.py`, `POST /v1/copilot/query`) — Claude answering
-  questions grounded in live platform state (lake, runs, registry, risk status);
-  degrades to a deterministic local summary without an API key. Strictly read-only.
-- **UI** — MODELS view (registry, stages, shadow reports, promote-with-sign-off) and
-  AI COPILOT view in the research workspace.
+- **Every order transits the risk engine** — position/sector/exposure/liquidity caps,
+  daily-loss halts, tiered drawdown response (halve → flatten → halt), circuit breakers
+  (consecutive rejections, feed staleness, broker errors, panic button), manual-only
+  reset. AI-sourced orders get the identical limits plus out-of-distribution signal
+  bounds and per-model capital caps.
+- **One code path from research to live** — the same strategy weights feed the
+  vectorized sweeper, the event backtester, the paper engine, and the live engine;
+  paper vs live differ only in which `BrokerAdapter` is constructed.
+- **No look-ahead, mechanically proven** — a perturbation test rewrites all future bars
+  and asserts every feature, every strategy, and every AI prediction at/before the
+  cutoff is bit-identical.
+- **A model cannot reach production without** beating a baseline on validation IC, a
+  shadow-mode report, and a named human sign-off — the registry refuses otherwise.
+- **Live is unarmed by default** — a real broker without `--arm-live` is auto-wrapped
+  in a dry-run interlock that journals intent and places nothing.
 
-```bash
-quantis ai train --model gbt --label-horizon 5
-quantis ai shadow --model <id> --days 126
-quantis ai promote --model <id> --to PRODUCTION --approved-by ricky
-quantis backtest --strategy ai_signal --param model_id=<id>
-quantis ai ask "which model should go to production?"
-```
+<p align="center">
+  <img src="docs/screenshots/models.png" width="900" alt="Model registry with stage lifecycle"><br>
+  <em>Model registry: the GBT model that beat its baseline in validation but failed shadow — held at SHADOW, exactly as designed.</em>
+</p>
 
-## Phase 3 — paper trading
+## What's inside
 
-- **Broker abstraction** (`quantis/broker/`) — one interface (`place / cancel /
-  poll_fills / positions / margins`), idempotent on `client_order_id` so a network retry
-  can never double-execute. `SimulatedBroker` fills at next-bar open with the shared NSE
-  cost model; Phase 5 adds Zerodha/Upstox adapters behind the same interface.
-- **OMS** (`quantis/oms/`) — order state machine with the TDD's exact status lifecycle
-  (`PENDING_RISK → APPROVED → SENT → PARTIALLY_FILLED → FILLED/CANCELLED/ERROR`);
-  illegal transitions raise; every transition appends to an `orders.jsonl` audit journal.
-- **EMS skeleton** (`quantis/ems/`) — execution algos: immediate and TWAP slicing
-  (each child's ADV participation is 1/N of the block's, so impact is measurably lower —
-  tested). Refuses any order that isn't risk-APPROVED.
-- **Full risk limit set** (`quantis/risk/live.py`) — tiered drawdown response
-  (NORMAL → HALVED → FLATTEN → HALTED), circuit breakers (consecutive rejections, feed
-  staleness, broker error spike, manual panic button), volatility targeting, and manual
-  `reset()` — a halt never re-arms itself.
-- **Paper engine** (`quantis/paper/`) — feed → strategy (same code path as backtest) →
-  risk gate → OMS → EMS → sim broker, decision at close t / fill at open t+1. Sessions
-  persist journal, fills, equity, risk decisions, and a reconciliation report.
-- **Reconciliation** — diffs OMS fill-implied positions vs the broker's book
-  (the TDD's network-partition safeguard), run at session end and on demand.
-- **Backtest parity, tested** — same data, same limits, same first trading day: paper
-  and backtest agree to ~0.2% terminal wealth on the controlled test; the CLI `--parity`
-  flag reports live tracking divergence on any real run.
+| Subsystem | Module | Highlights |
+|---|---|---|
+| Data lake | `quantis/data/` | NSE daily bars as Parquet; Yahoo (`.NS`) + deterministic synthetic source for CI |
+| Features | `quantis/features/` | Point-in-time contract: row *t* uses only data through close *t* |
+| Feature store | `quantis/fstore/` | TDD schema `(instrument_id, feature_name, as_of_ts, value, schema_version)`; as-of joins; training frames with strictly-future labels |
+| Backtesting | `quantis/backtest/` | Event-driven (risk-gated, integer cash) + vectorized (sweeps), one shared NSE cost model: brokerage/STT/stamp/exchange/SEBI/GST + √-impact slippage |
+| Validation | `quantis/research/` | Rolling walk-forward, stitched OOS equity, block-bootstrap Monte Carlo, deflated Sharpe; experiment tracking (MLflow or local JSONL) |
+| Risk | `quantis/risk/` | Veto engine + live layer: tiered drawdown, vol targeting, circuit breakers; every decision logged with the limit snapshot in force |
+| OMS / EMS | `quantis/oms/` `quantis/ems/` | TDD status lifecycle (`PENDING_RISK → … → FILLED`), illegal transitions raise, append-only journal; TWAP slicing with measurably lower impact |
+| Brokers | `quantis/broker/` | One interface: simulator, dry-run interlock, Zerodha Kite (tag-based idempotency — timeout-after-land never double-executes, tested against a fake client) |
+| Paper/live | `quantis/paper/` `quantis/live/` | Same engine; live adds reconciliation at start/periodic/EOD, breaker-trip order cancellation, SEBI algo tagging |
+| AI | `quantis/ai/` | Ridge (exactly attributable) + LightGBM signal models; governed registry; shadow mode; Claude-powered copilot grounded in platform state (read-only, local fallback) |
+| Audit | `quantis/audit/` | Append-only SHA-256 hash chain; editing or deleting any record breaks `verify()` at that sequence |
+| UI / API | `quantis/api.py` `web/` | FastAPI (`/v1/...`) + terminal-style workspace: backtest, walk-forward, paper, model registry, copilot |
 
-## Phase 2 — research platform
-
-- **Feature store** (`quantis/fstore/`) — materialized, versioned features using the TDD's
-  offline-table schema `(instrument_id, feature_name, as_of_ts, value, schema_version)`.
-  `get_asof()` is a point-in-time join that structurally cannot return future values;
-  `training_frame()` builds supervised datasets with strictly-future labels (Phase 4 prep).
-  Feast is deferred until there's an online serving path (Phase 3) — same schema, so it's
-  a backend swap, not an API change.
-- **Walk-forward validation** (`quantis/research/walkforward.py`) — rolling/expanding
-  train→test splits: grid selected on train (vectorized), evaluated OOS in the event
-  engine (risk gate on), OOS segments stitched into the only equity curve treated as
-  evidence. Plus block-bootstrap Monte Carlo (Sharpe/maxDD distributions) and the
-  deflated Sharpe ratio penalizing the number of trials.
-- **Experiment tracking** (`quantis/research/tracking.py`) — every backtest/walk-forward
-  logs params, metrics, and artifacts to MLflow when installed, else to a local JSONL
-  registry (`runs/experiments.jsonl`). The loop never depends on a tracking server.
-- **Research workspace** (`quantis ui`) — FastAPI (`/v1/...` per the TDD API spec) +
-  a terminal-style web UI: run risk-gated backtests, walk-forwards, browse the run
-  registry, and see vetoes broken down by risk rule.
-
-## What's in the MVP (Phase 1)
-
-- **Data lake** — daily NSE OHLCV as per-symbol Parquet (`quantis/data/`). Sources:
-  Yahoo Finance (`.NS`, split/dividend-adjusted) or a deterministic synthetic generator
-  for offline work and CI.
-- **Point-in-time features** (`quantis/features/`) — returns, momentum (12-1), SMAs,
-  RSI, ATR, realized vol, z-score, rupee ADV. Contract: row *t* uses only data through
-  the close of *t*, enforced by a mechanical perturbation test.
-- **Strategy plug-ins** (`quantis/strategies/`) — one interface, three templates:
-  cross-sectional momentum, MA-crossover trend following, RSI mean reversion.
-  One weights frame feeds both engines (no research/production divergence).
-- **Risk engine with veto authority** (`quantis/risk/`) — every order transits
-  `RiskEngine.evaluate()`; there is no bypass path. Phase-1 limit set: position weight,
-  sector weight, gross exposure, ADV participation, daily-loss halt, drawdown
-  kill-switch, and an order-notional sanity bound. Every decision (including
-  rejections) is persisted as the audit trail.
-- **Two backtest engines** (`quantis/backtest/`) sharing one NSE cost model
-  (brokerage/STT/stamp/exchange/SEBI/GST + square-root impact slippage):
-  - *Event-driven* — bar-by-bar, integer cash, per-order risk gate. Final validation.
-  - *Vectorized* — whole-history matrix math for parameter sweeps.
-- **Run artifacts** — every backtest writes `runs/<ts>_<strategy>/` with report,
-  metrics JSON, equity curve, fills, and the full risk-decision log.
+<p align="center">
+  <img src="docs/screenshots/paper.png" width="900" alt="Paper trading session with risk status"><br>
+  <em>Paper trading: session registry, equity curve, circuit-breaker state, and OMS-vs-broker reconciliation.</em>
+</p>
 
 ## Quickstart
 
 ```bash
 pip install -e ".[data,research,dev]"
 
-# 1. Ingest data (real NSE via Yahoo, or --source synthetic for offline)
-quantis ingest --source yahoo --start 2018-01-01
-quantis ingest --source synthetic            # offline alternative
-
-# 2. Run a risk-gated backtest
-quantis backtest --strategy momentum --start 2019-01-01
-quantis backtest --strategy ma_crossover --param fast=10 --param slow=100
-
-# 3. Parameter sweep (vectorized), then validate the winner in the event engine
-quantis sweep --strategy ma_crossover --grid fast=10,20,50 --grid slow=50,100,200
-
-# 4. Walk-forward validation — out-of-sample evidence, Monte Carlo, deflated Sharpe
+quantis ingest --source yahoo --start 2019-01-01   # real NSE data (or --source synthetic)
+quantis backtest --strategy momentum               # risk-gated event backtest
 quantis walkforward --strategy momentum --grid top_n=5,10 --grid rebalance_days=21,42
+quantis paper --strategy ma_crossover --parity     # OMS/EMS/sim-broker + parity report
+quantis ui                                         # research workspace at :8000
 
-# 5. Paper trading — replay feed through OMS/EMS/sim-broker with the full risk set
-quantis paper --strategy momentum --start 2024-01-01 --parity
-quantis paper --strategy ma_crossover --algo twap --slices 4
+# AI lifecycle (pip install -e ".[ai]")
+quantis ai train --model gbt
+quantis ai shadow --model <id>
+quantis ai promote --model <id> --to PRODUCTION --approved-by <you>   # refuses without sign-off
 
-# 6. Feature store + research workspace
-quantis materialize                          # versioned point-in-time feature tables
-quantis ui                                   # http://127.0.0.1:8000
+# Live path (pip install -e ".[live]") — UNARMED by default
+quantis live --strategy momentum --algo-id SEBI-XXX                   # sim broker
+quantis live --broker zerodha --algo-id SEBI-XXX                      # dry run: journals, never places
+quantis live --broker zerodha --algo-id SEBI-XXX --arm-live           # real orders (your call, not the code's)
 
-quantis list
-pytest                                        # cost model, risk rules, look-ahead, PIT store, walk-forward
+pytest   # 119 tests: cost model, risk rules, state machines, parity, look-ahead perturbation, audit chain
 ```
 
-## Design commitments carried from the TDD
+## Design decisions worth reading the code for
 
-| TDD principle | Where it lives here |
-|---|---|
-| Risk engine has unconditional veto; no order bypasses it | `risk/engine.py`, enforced in `backtest/engine.py` |
-| One code path for research and simulation | `strategies/base.py` weights contract feeds both engines |
-| Same cost model in fast and slow engines | `backtest/costs.py` shared by `engine.py` and `vectorized.py` |
-| Look-ahead bias prevented structurally and tested | `tests/test_no_lookahead.py` perturbation test |
-| Every risk decision logged with limit snapshot (audit trail) | `RiskDecision.limit_snapshot`, `risk_decisions.csv` per run |
-| Lake format portable to S3/Timescale later | Parquet long-format bars, `data/store.py` |
+1. **The risk engine can only say no.** Strategies size positions; risk vetoes. There is
+   no code path where risk "adjusts" an order — veto or pass. This keeps the audit
+   trail interpretable: every fill maps to exactly one approval under a recorded limit
+   snapshot. (`quantis/risk/engine.py`)
+2. **The double-execution problem is solved with order tags, not hope.** A network
+   timeout after the broker accepted an order is the classic way retail algos
+   double-buy. The Kite adapter re-queries by idempotency tag before re-placing;
+   the test suite simulates timeout-after-land explicitly. (`quantis/broker/zerodha.py`)
+3. **Backtest honesty is a test suite, not a promise.** Look-ahead is checked by
+   perturbation, walk-forward selection happens strictly on train windows, sweeps are
+   penalized with the deflated Sharpe, and the paper engine's parity with the
+   backtester is asserted numerically. (`tests/`)
+4. **Infrastructure is deliberately boring at this scale.** Parquet instead of
+   TimescaleDB, JSONL instead of Kafka, one process instead of microservices — but with
+   the TDD's schemas and interfaces, so each swap is a backend change. The
+   `docker-compose.yml` stages the real stack.
+5. **AI is a strategy plug-in, not a special citizen.** Model signals become target
+   weights through the same interface as a moving-average crossover, and get *extra*
+   safeguards (signal sanity bounds, per-model caps), not exemptions.
 
-## Roadmap (from the TDD, Part 16)
+## Status & roadmap
 
-1. **MVP** — data, features, backtester, strategy templates, risk limits ✅
-2. **Research platform** — feature store, walk-forward validation, experiment tracking, research UI ✅
-3. **Paper trading** — replay/delayed feed, simulated broker adapter, OMS/EMS, full limit set ✅
-4. **AI integration** — GBT + ridge signal models, model registry, shadow-mode promotion, LLM copilot ✅
-   (deferred to later: deep sequence models — the registry/promotion pipeline is model-agnostic)
-5. **Live trading** — Zerodha connector, dry-run interlock, reconciliation, hash-chained audit, SEBI tagging ✅
-   (Upstox/Angel One follow the same `BrokerAdapter` pattern; delayed Yahoo feed for EOD strategies, licensed real-time feed later)
-6. Institutional — multi-asset, multi-tenant RBAC, strategy marketplace, white-label API
+Phases 1–5 of the TDD are complete (research loop, research platform, paper trading,
+AI integration, live path). Known gaps, tracked honestly: survivorship-biased universe
+(needs historical index membership), VWAP/Iceberg/SOR (need intraday data),
+correlation-based concentration limits, stress-scenario replays, deep sequence models,
+Next.js frontend, real-time licensed market data. Phase 6 (multi-tenant, marketplace,
+white-label) is deliberately out of solo scope.
 
-Full design: `docs/` (Quantis TDD PDF).
+## Disclaimer
+
+Educational/portfolio software. Nothing here is investment advice. The live path ships
+unarmed for a reason: markets are efficient enough to be humbling, and this project's
+own walk-forward results prove it.
