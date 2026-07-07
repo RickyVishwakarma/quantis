@@ -349,9 +349,14 @@ async function init() {
           .filter(([,v]) => typeof v === "number").map(([k,v]) => [k,[v]])));
     };
   }
-  $("btStrategy").onchange();
-  $("wfStrategy").onchange();
-  $("ppStrategy").onchange();
+  // default to a template strategy — ai_signal needs a PRODUCTION model
+  // (or an explicit model_id) before it can run
+  const dflt = strats.some(s => s.name === "momentum") ? "momentum"
+             : (strats.find(s => s.name !== "ai_signal") || strats[0]).name;
+  for (const sel of [$("btStrategy"), $("wfStrategy"), $("ppStrategy")]) {
+    sel.value = dflt;
+    sel.onchange();
+  }
 }
 
 // ---- paper trading ----

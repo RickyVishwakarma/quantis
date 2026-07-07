@@ -118,7 +118,11 @@ class ModelRegistry:
                     if e["stage"] == Stage.PRODUCTION.value
                     and (name is None or e["name"] == name)]
             if not prod:
-                raise KeyError(f"no PRODUCTION model{f' named {name!r}' if name else ''}")
+                raise KeyError(
+                    f"no PRODUCTION model{f' named {name!r}' if name else ''} in the "
+                    "registry — promote one (`quantis ai promote --model <id> --to "
+                    "PRODUCTION --approved-by <you>`) or pass an explicit model_id"
+                )
             return sorted(prod, key=lambda e: e["promoted_at"] or "")[-1]
         return self.get(ref)
 

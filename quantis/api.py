@@ -27,6 +27,17 @@ from .risk import RiskLimits
 WEB_DIR = Path(__file__).resolve().parent.parent / "web" / "research-workspace"
 
 
+def _build_strategy(name: str, params: dict):
+    """Construct a strategy; surface bad configs as 422s, not 500s
+    (e.g. ai_signal with no PRODUCTION model in the registry)."""
+    if name not in strategies.available():
+        raise HTTPException(422, f"unknown strategy {name!r}")
+    try:
+        return strategies.get(name)(**params)
+    except (KeyError, FileNotFoundError, TypeError, ValueError) as e:
+        raise HTTPException(422, f"cannot construct {name!r}: {e}")
+
+
 class BacktestRequest(BaseModel):
     strategy: str
     params: dict = Field(default_factory=dict)
@@ -144,10 +155,8 @@ def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
 
     @app.post("/v1/backtests")
     def create_backtest(req: BacktestRequest):
-        if req.strategy not in strategies.available():
-            raise HTTPException(422, f"unknown strategy {req.strategy!r}")
+        strat = _build_strategy(req.strategy, req.params)
         wide = load_wide(req.start, req.end)
-        strat = strategies.get(req.strategy)(**req.params)
         engine = EventBacktester(
             initial_capital=req.capital,
             cost_model=NSECostModel(segment=req.segment),
@@ -175,7 +184,7 @@ def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
         try:
             wf = run_walkforward(wide, req.strategy, grid, cfg,
                                  initial_capital=req.capital)
-        except ValueError as e:
+        except (ValueError, KeyError, FileNotFoundError) as e:
             raise HTTPException(422, str(e))
         get_tracker(runs_root).log_run(
             name=f"{req.strategy}_walkforward",
@@ -239,13 +248,12 @@ def create_app(lake_root: str = "data/lake", runs_root: str = "runs",
         from .feed import ReplayFeed
         from .paper import PaperTradingEngine
 
-        if req.strategy not in strategies.available():
-            raise HTTPException(422, f"unknown strategy {req.strategy!r}")
+        strat = _build_strategy(req.strategy, req.params)
         wide = load_wide(req.start, req.end)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = Path(paper_root) / f"{stamp}_{req.strategy}"
         engine = PaperTradingEngine(
-            strategy=strategies.get(req.strategy)(**req.params),
+            strategy=strat,
             initial_capital=req.capital,
             risk_limits=RiskLimits(),
             execution_algo=req.algo,
