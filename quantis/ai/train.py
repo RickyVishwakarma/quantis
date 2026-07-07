@@ -34,7 +34,9 @@ def _per_date_ic(frame: pd.DataFrame, pred_col: str, label_col: str) -> float:
     ics = []
     for _, grp in frame.groupby("ts"):
         if len(grp) >= 5:
-            ic = grp[pred_col].corr(grp[label_col], method="spearman")
+            # Spearman as Pearson-on-ranks (avoids the scipy dependency
+            # pandas requires for method="spearman"; identical result)
+            ic = grp[pred_col].rank().corr(grp[label_col].rank())
             if pd.notna(ic):
                 ics.append(ic)
     return float(np.mean(ics)) if ics else float("nan")
